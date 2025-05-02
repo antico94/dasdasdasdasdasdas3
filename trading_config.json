@@ -1,0 +1,91 @@
+{
+    "instruments": [
+        {
+            "symbol": "EURUSD",
+            "description": "Euro vs US Dollar",
+            "pip_value": 0.0001,
+            "timeframes": [
+                "M1",
+                "M5",
+                "M15",
+                "H1",
+                "H4",
+                "D1"
+            ],
+            "history_size": {
+                "M1": 300,
+                "M5": 300,
+                "M15": 300,
+                "H1": 300,
+                "H4": 300,
+                "D1": 300
+            }
+        },
+        {
+            "symbol": "GBPUSD",
+            "description": "Great Britain Pound vs US Dollar",
+            "pip_value": 0.0001,
+            "timeframes": [
+                "M1",
+                "M5",
+                "M15",
+                "H1",
+                "H4",
+                "D1"
+            ],
+            "history_size": {
+                "M1": 300,
+                "M5": 300,
+                "M15": 300,
+                "H1": 300,
+                "H4": 300,
+                "D1": 300
+            }
+        },
+        {
+            "symbol": "USDJPY",
+            "description": "US Dollar vs Japanese Yen",
+            "pip_value": 0.01,
+            "timeframes": [
+                "M1",
+                "M5",
+                "M15",
+                "H1",
+                "H4",
+                "D1"
+            ],
+            "history_size": {
+                "M1": 300,
+                "M5": 300,
+                "M15": 300,
+                "H1": 300,
+                "H4": 300,
+                "D1": 300
+            }
+        },
+        {
+            "symbol": "XAUUSD",
+            "description": "Gold vs US Dollar",
+            "pip_value": 0.01,
+            "timeframes": [
+                "M1",
+                "M5",
+                "M15",
+                "H1",
+                "H4",
+                "D1"
+            ],
+            "history_size": {
+                "M1": 300,
+                "M5": 300,
+                "M15": 300,
+                "H1": 300,
+                "H4": 300,
+                "D1": 300
+            }
+        }
+    ],
+    "sync_interval_seconds": 10,
+    "max_retry_attempts": 3,
+    "retry_delay_seconds": 5
+}
