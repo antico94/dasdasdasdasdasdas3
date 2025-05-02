@@ -268,3 +268,54 @@ class EventBus:
                 return False
 
         return True
+
+    def stop(self) -> None:
+        """Stop event dispatcher with timeout"""
+        if not self._running:
+            return
+
+        try:
+            self._stop_event.set()
+
+            # Wait for event dispatcher thread to terminate with timeout
+            if self._dispatch_thread and self._dispatch_thread.is_alive():
+                max_wait_seconds = 10
+                for i in range(max_wait_seconds):
+                    if not self._dispatch_thread.is_alive():
+                        break
+                    time.sleep(1)
+
+                # If still alive after timeout, log warning
+                if self._dispatch_thread.is_alive():
+                    self._logger.log_event(
+                        level="WARNING",
+                        message=f"Event dispatcher thread didn't terminate after {max_wait_seconds} seconds",
+                        event_type="EVENT_DISPATCHER_STOP",
+                        component="event_bus",
+                        action="stop",
+                        status="timeout"
+                    )
+                    # Don't attempt join again as it may block indefinitely
+
+            self._running = False
+
+            self._logger.log_event(
+                level="INFO",
+                message="Event dispatcher stopped",
+                event_type="EVENT_DISPATCHER_STOP",
+                component="event_bus",
+                action="stop",
+                status="success"
+            )
+
+        except Exception as e:
+            self._logger.log_error(
+                level="ERROR",
+                message=f"Error stopping event dispatcher: {str(e)}",
+                exception_type=type(e).__name__,
+                function="stop",
+                traceback=str(e),
+                context={}
+            )
+            # Mark as not running even if there was an error
+            self._running = False

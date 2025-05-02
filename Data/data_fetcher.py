@@ -1,13 +1,11 @@
 # Data/data_fetcher.py
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Optional
 from datetime import datetime, timedelta
 import threading
 import time
-import sys
 import traceback
 
 from sqlalchemy import and_, desc, func
-from sqlalchemy.exc import SQLAlchemyError
 
 from Config.trading_config import ConfigManager, TimeFrame, InstrumentConfig
 from Database.db_session import DatabaseSession
@@ -510,12 +508,54 @@ class DataFetcher:
 
     def _fetch_loop(self) -> None:
         """Main data fetching loop"""
+        reconnection_count = 0
+        max_reconnection_attempts = 5
+        reconnection_cooldown = 60  # seconds
+        last_reconnection_time = None
+
         while not self._stop_event.is_set():
             try:
                 start_time = time.time()
 
+                # Check MT5 connection before fetching
+                if not self._mt5_manager.ensure_connection():
+                    # Connection error detected
+                    if last_reconnection_time is None or (time.time() - last_reconnection_time) > reconnection_cooldown:
+                        reconnection_count += 1
+                        if reconnection_count <= max_reconnection_attempts:
+                            last_reconnection_time = time.time()
+                            self._logger.log_event(
+                                level="WARNING",
+                                message=f"MT5 connection error detected. Attempting reconnection ({reconnection_count}/{max_reconnection_attempts})",
+                                event_type="MT5_CONNECTION_ERROR",
+                                component="data_fetcher",
+                                action="_fetch_loop",
+                                status="retry"
+                            )
+                            if self.handle_mt5_reconnection():
+                                reconnection_count = 0  # Reset count on successful reconnection
+                        else:
+                            self._logger.log_error(
+                                level="CRITICAL",
+                                message=f"Failed to reconnect to MT5 after {max_reconnection_attempts} attempts",
+                                exception_type="MT5ConnectionError",
+                                function="_fetch_loop",
+                                traceback="",
+                                context={"reconnection_attempts": max_reconnection_attempts}
+                            )
+                            # Wait longer before retry
+                            time.sleep(30)
+                            reconnection_count = 0  # Reset to try again
+
+                    # Skip this iteration and sleep
+                    time.sleep(self._config.sync_interval_seconds)
+                    continue
+
                 # Fetch new data for all instrument/timeframe pairs
                 self._fetch_all_new_data()
+
+                # Reset reconnection count if we successfully fetched data
+                reconnection_count = 0
 
                 # Calculate sleep time to maintain sync interval
                 elapsed = time.time() - start_time
@@ -548,11 +588,14 @@ class DataFetcher:
 
     def _fetch_all_new_data(self) -> None:
         """Fetch new data for all configured instrument/timeframe pairs"""
+        current_time = datetime.now()
+
         for (symbol, timeframe), mapping in self._instrument_timeframe_map.items():
             try:
                 instrument_id = mapping["instrument_id"]
                 timeframe_id = mapping["timeframe_id"]
                 history_size = mapping["history_size"]
+                minutes = timeframe.minutes
 
                 # Get latest timestamp from database
                 latest_timestamp = None
@@ -566,64 +609,117 @@ class DataFetcher:
                     # No data yet, skip (should have been loaded in initialize)
                     continue
 
-                # Calculate from_date for getting new data
-                minutes = timeframe.minutes
-                from_date = latest_timestamp + timedelta(minutes=minutes)
-                now = datetime.now()
+                # Calculate time difference between now and latest bar
+                time_difference_minutes = (current_time - latest_timestamp).total_seconds() / 60
 
-                # Skip if we're already up to date
-                if from_date > now:
-                    continue
+                # If difference is more than the timeframe period, fetch data
+                # We also fetch if the difference is less than a timeframe to update the current bar
+                if time_difference_minutes > 0:
+                    # Fetch several periods back to ensure we get all missing bars
+                    # Use a slightly earlier start time to ensure we catch the beginning of the period
+                    lookback_periods = max(3, int(time_difference_minutes / minutes) + 1)
+                    from_date = current_time - timedelta(minutes=minutes * lookback_periods)
 
-                # Fetch new data from MT5
-                mt5_data = self._mt5_manager.copy_rates_from(symbol, timeframe, from_date, 100)
+                    # Log the synchronization attempt
+                    self._logger.log_event(
+                        level="INFO",
+                        message=f"Syncing data for {symbol}/{timeframe.name} from {from_date} to now",
+                        event_type="DATA_SYNC",
+                        component="data_fetcher",
+                        action="_fetch_all_new_data",
+                        status="starting",
+                        details={
+                            "symbol": symbol,
+                            "timeframe": timeframe.name,
+                            "latest_timestamp": latest_timestamp.isoformat(),
+                            "current_time": current_time.isoformat(),
+                            "time_difference_minutes": time_difference_minutes,
+                            "from_date": from_date.isoformat()
+                        }
+                    )
 
-                if mt5_data and len(mt5_data) > 0:
-                    # Convert to price bars
-                    bars = self._convert_to_price_bars(mt5_data, instrument_id, timeframe_id)
+                    # Fetch data from MT5
+                    mt5_data = self._mt5_manager.copy_rates_range(symbol, timeframe, from_date, current_time)
 
-                    if bars:
-                        # Insert into database using SQLAlchemy
-                        with self._db_session.session_scope() as session:
+                    if mt5_data and len(mt5_data) > 0:
+                        # Convert to price bars
+                        bars = self._convert_to_price_bars(mt5_data, instrument_id, timeframe_id)
+
+                        if bars:
+                            # Insert or update bars in database
+                            updated_count = 0
+                            inserted_count = 0
+
+                            with self._db_session.session_scope() as session:
+                                for bar in bars:
+                                    # Check if bar already exists
+                                    existing = session.query(PriceBar).filter(
+                                        and_(
+                                            PriceBar.instrument_id == bar.instrument_id,
+                                            PriceBar.timeframe_id == bar.timeframe_id,
+                                            PriceBar.timestamp == bar.timestamp
+                                        )
+                                    ).first()
+
+                                    if existing:
+                                        # Update existing record if any value is different
+                                        if (existing.open != bar.open or
+                                                existing.high != bar.high or
+                                                existing.low != bar.low or
+                                                existing.close != bar.close or
+                                                existing.volume != bar.volume or
+                                                existing.spread != bar.spread):
+                                            existing.open = bar.open
+                                            existing.high = bar.high
+                                            existing.low = bar.low
+                                            existing.close = bar.close
+                                            existing.volume = bar.volume
+                                            existing.spread = bar.spread
+                                            updated_count += 1
+                                    else:
+                                        # Add new record
+                                        session.add(bar)
+                                        inserted_count += 1
+
+                            # Maintain history limit
+                            self._maintain_history_limit(instrument_id, timeframe_id, history_size)
+
+                            # Log the sync results
+                            self._logger.log_event(
+                                level="INFO",
+                                message=f"Synced {symbol}/{timeframe.name}: {inserted_count} new, {updated_count} updated bars",
+                                event_type="DATA_FETCH",
+                                component="data_fetcher",
+                                action="_fetch_all_new_data",
+                                status="success",
+                                details={
+                                    "symbol": symbol,
+                                    "timeframe": timeframe.name,
+                                    "new_bars": inserted_count,
+                                    "updated_bars": updated_count,
+                                    "total_fetched": len(bars)
+                                }
+                            )
+
+                            # Notify listeners of new data
                             for bar in bars:
-                                # Check if bar already exists
-                                existing = session.query(PriceBar).filter(
-                                    and_(
-                                        PriceBar.instrument_id == bar.instrument_id,
-                                        PriceBar.timeframe_id == bar.timeframe_id,
-                                        PriceBar.timestamp == bar.timestamp
-                                    )
-                                ).first()
-
-                                if existing:
-                                    # Update existing record
-                                    existing.open = bar.open
-                                    existing.high = bar.high
-                                    existing.low = bar.low
-                                    existing.close = bar.close
-                                    existing.volume = bar.volume
-                                    existing.spread = bar.spread
-                                else:
-                                    # Add new record
-                                    session.add(bar)
-
-                        # Maintain history limit
-                        self._maintain_history_limit(instrument_id, timeframe_id, history_size)
-
+                                event = NewBarEvent(instrument_id, timeframe_id, bar, symbol, timeframe.name)
+                                self._event_bus.publish(event)
+                    else:
                         self._logger.log_event(
-                            level="INFO",
-                            message=f"Fetched {len(bars)} new bars for {symbol}/{timeframe.name}",
+                            level="WARNING",
+                            message=f"No data returned from MT5 for {symbol}/{timeframe.name}",
                             event_type="DATA_FETCH",
                             component="data_fetcher",
                             action="_fetch_all_new_data",
-                            status="success",
-                            details={"symbol": symbol, "timeframe": timeframe.name, "count": len(bars)}
+                            status="warning",
+                            details={
+                                "symbol": symbol,
+                                "timeframe": timeframe.name,
+                                "from_date": from_date.isoformat(),
+                                "to_date": current_time.isoformat()
+                            }
                         )
-
-                        # Notify listeners of new data
-                        for bar in bars:
-                            event = NewBarEvent(instrument_id, timeframe_id, bar, symbol, timeframe.name)
-                            self._event_bus.publish(event)
 
             except Exception as e:
                 self._logger.log_error(
@@ -733,6 +829,8 @@ class DataFetcher:
 
     def force_sync(self, symbol: Optional[str] = None, timeframe: Optional[TimeFrame] = None) -> bool:
         """Force immediate synchronization for specific or all instruments/timeframes"""
+        current_time = datetime.now()
+
         try:
             if symbol and timeframe:
                 # Sync specific instrument/timeframe
@@ -748,6 +846,12 @@ class DataFetcher:
                     )
                     return False
 
+                mapping = self._instrument_timeframe_map[key]
+                instrument_id = mapping["instrument_id"]
+                timeframe_id = mapping["timeframe_id"]
+                history_size = mapping["history_size"]
+                minutes = timeframe.minutes
+
                 self._logger.log_event(
                     level="INFO",
                     message=f"Forcing sync for {symbol}/{timeframe.name}",
@@ -758,13 +862,7 @@ class DataFetcher:
                     details={"symbol": symbol, "timeframe": timeframe.name}
                 )
 
-                # Get latest timestamp
-                mapping = self._instrument_timeframe_map[key]
-                instrument_id = mapping["instrument_id"]
-                timeframe_id = mapping["timeframe_id"]
-                history_size = mapping["history_size"]
-
-                # Get latest timestamp from database using SQLAlchemy
+                # Get latest timestamp from database
                 latest_timestamp = None
                 with self._db_session.session_scope() as session:
                     latest_timestamp = session.query(func.max(PriceBar.timestamp)) \
@@ -776,17 +874,23 @@ class DataFetcher:
                     # No data yet, load initial data
                     mt5_data = self._mt5_manager.copy_rates_from_pos(symbol, timeframe, 0, history_size)
                 else:
-                    # Fetch new data since latest timestamp
-                    minutes = timeframe.minutes
-                    from_date = latest_timestamp + timedelta(minutes=minutes)
-                    mt5_data = self._mt5_manager.copy_rates_from(symbol, timeframe, from_date, 100)
+                    # Calculate lookback period based on difference between current time and latest timestamp
+                    time_difference_minutes = (current_time - latest_timestamp).total_seconds() / 60
+                    lookback_periods = max(3, int(time_difference_minutes / minutes) + 1)
+                    from_date = current_time - timedelta(minutes=minutes * lookback_periods)
+
+                    # Use copy_rates_range to get all bars in the time range
+                    mt5_data = self._mt5_manager.copy_rates_range(symbol, timeframe, from_date, current_time)
 
                 if mt5_data and len(mt5_data) > 0:
                     # Convert to price bars
                     bars = self._convert_to_price_bars(mt5_data, instrument_id, timeframe_id)
 
                     if bars:
-                        # Insert into database using SQLAlchemy
+                        # Insert or update bars in database
+                        updated_count = 0
+                        inserted_count = 0
+
                         with self._db_session.session_scope() as session:
                             for bar in bars:
                                 # Check if bar already exists
@@ -799,34 +903,68 @@ class DataFetcher:
                                 ).first()
 
                                 if existing:
-                                    # Update existing bar
-                                    existing.open = bar.open
-                                    existing.high = bar.high
-                                    existing.low = bar.low
-                                    existing.close = bar.close
-                                    existing.volume = bar.volume
-                                    existing.spread = bar.spread
+                                    # Update existing record if any value is different
+                                    if (existing.open != bar.open or
+                                            existing.high != bar.high or
+                                            existing.low != bar.low or
+                                            existing.close != bar.close or
+                                            existing.volume != bar.volume or
+                                            existing.spread != bar.spread):
+                                        existing.open = bar.open
+                                        existing.high = bar.high
+                                        existing.low = bar.low
+                                        existing.close = bar.close
+                                        existing.volume = bar.volume
+                                        existing.spread = bar.spread
+                                        updated_count += 1
                                 else:
-                                    # Add new bar
+                                    # Add new record
                                     session.add(bar)
+                                    inserted_count += 1
 
                         # Maintain history limit
                         self._maintain_history_limit(instrument_id, timeframe_id, history_size)
 
                         self._logger.log_event(
                             level="INFO",
-                            message=f"Forced sync completed for {symbol}/{timeframe.name}: {len(bars)} bars",
+                            message=f"Forced sync completed for {symbol}/{timeframe.name}: {inserted_count} new, {updated_count} updated bars",
                             event_type="DATA_SYNC",
                             component="data_fetcher",
                             action="force_sync",
                             status="success",
-                            details={"symbol": symbol, "timeframe": timeframe.name, "count": len(bars)}
+                            details={
+                                "symbol": symbol,
+                                "timeframe": timeframe.name,
+                                "new_bars": inserted_count,
+                                "updated_bars": updated_count,
+                                "total_fetched": len(bars)
+                            }
                         )
 
                         # Notify listeners of new data
                         for bar in bars:
                             event = NewBarEvent(instrument_id, timeframe_id, bar, symbol, timeframe.name)
                             self._event_bus.publish(event)
+                    else:
+                        self._logger.log_event(
+                            level="WARNING",
+                            message=f"No bars converted from MT5 data for {symbol}/{timeframe.name}",
+                            event_type="DATA_SYNC",
+                            component="data_fetcher",
+                            action="force_sync",
+                            status="warning",
+                            details={"symbol": symbol, "timeframe": timeframe.name}
+                        )
+                else:
+                    self._logger.log_event(
+                        level="WARNING",
+                        message=f"No data returned from MT5 for {symbol}/{timeframe.name}",
+                        event_type="DATA_SYNC",
+                        component="data_fetcher",
+                        action="force_sync",
+                        status="warning",
+                        details={"symbol": symbol, "timeframe": timeframe.name}
+                    )
             else:
                 # Sync all instruments/timeframes
                 self._logger.log_event(
@@ -861,3 +999,118 @@ class DataFetcher:
                 context={"symbol": symbol, "timeframe": timeframe.name if timeframe else None}
             )
             return False
+
+    def handle_mt5_reconnection(self) -> bool:
+        """Handle MT5 disconnection by waiting and reinitializing"""
+        try:
+            self._logger.log_event(
+                level="WARNING",
+                message="Handling MT5 disconnection",
+                event_type="MT5_RECONNECTION",
+                component="data_fetcher",
+                action="handle_mt5_reconnection",
+                status="starting"
+            )
+
+            # Wait for a bit to give MT5 terminal time to fully start
+            time.sleep(5)
+
+            # Try to reinitialize MT5
+            if not self._mt5_manager.initialize():
+                # Wait longer and try again
+                self._logger.log_event(
+                    level="WARNING",
+                    message="First reconnection attempt failed, waiting longer...",
+                    event_type="MT5_RECONNECTION",
+                    component="data_fetcher",
+                    action="handle_mt5_reconnection",
+                    status="retry"
+                )
+
+                time.sleep(10)
+
+                if not self._mt5_manager.initialize():
+                    self._logger.log_error(
+                        level="CRITICAL",
+                        message="Failed to reconnect to MT5 after multiple attempts",
+                        exception_type="MT5ConnectionError",
+                        function="handle_mt5_reconnection",
+                        traceback="",
+                        context={}
+                    )
+                    return False
+
+            self._logger.log_event(
+                level="INFO",
+                message="Successfully reconnected to MT5",
+                event_type="MT5_RECONNECTION",
+                component="data_fetcher",
+                action="handle_mt5_reconnection",
+                status="success"
+            )
+
+            # Force a complete data resync
+            return self.force_sync()
+
+        except Exception as e:
+            self._logger.log_error(
+                level="ERROR",
+                message=f"Error during MT5 reconnection: {str(e)}",
+                exception_type=type(e).__name__,
+                function="handle_mt5_reconnection",
+                traceback=traceback.format_exc(),
+                context={}
+            )
+            return False
+
+    def stop(self) -> None:
+        """Stop data fetcher with timeout to ensure clean shutdown"""
+        if not self._running:
+            return
+
+        try:
+            # Signal threads to stop
+            self._stop_event.set()
+
+            # Wait for fetch thread to terminate with timeout
+            if self._fetch_thread and self._fetch_thread.is_alive():
+                max_wait_seconds = 15
+                for i in range(max_wait_seconds):
+                    if not self._fetch_thread.is_alive():
+                        break
+                    time.sleep(1)
+
+                # If still alive after timeout, log warning
+                if self._fetch_thread.is_alive():
+                    self._logger.log_event(
+                        level="WARNING",
+                        message=f"Data fetcher thread didn't terminate after {max_wait_seconds} seconds",
+                        event_type="DATA_FETCHER_STOP",
+                        component="data_fetcher",
+                        action="stop",
+                        status="timeout"
+                    )
+                    # Don't attempt join again as it may block indefinitely
+
+            self._running = False
+
+            self._logger.log_event(
+                level="INFO",
+                message="Data fetcher stopped",
+                event_type="DATA_FETCHER_STOP",
+                component="data_fetcher",
+                action="stop",
+                status="success"
+            )
+
+        except Exception as e:
+            self._logger.log_error(
+                level="ERROR",
+                message=f"Error stopping data fetcher: {str(e)}",
+                exception_type=type(e).__name__,
+                function="stop",
+                traceback=traceback.format_exc(),
+                context={}
+            )
+            # Mark as not running even if there was an error
+            self._running = False

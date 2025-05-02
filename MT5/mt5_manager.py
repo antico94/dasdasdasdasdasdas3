@@ -64,22 +64,59 @@ class MT5Manager:
                 status="starting"
             )
 
-            # Initialize MT5
-            if not mt5.initialize():
-                error = mt5.last_error()
-                self._logger.log_error(
-                    level="CRITICAL",
-                    message=f"Failed to initialize MT5: {error}",
-                    exception_type="MT5Error",
-                    function="initialize",
-                    traceback="",
-                    context={"error_code": error[0], "error_message": error[1]}
+            # Check if MT5 is already initialized
+            if mt5.initialize():
+                self._logger.log_event(
+                    level="INFO",
+                    message="MT5 was already initialized",
+                    event_type="MT5_INIT",
+                    component="mt5_manager",
+                    action="initialize",
+                    status="success"
                 )
-                return False
+            else:
+                # Try to initialize MT5
+                # First, ensure any previous instances are shut down
+                try:
+                    mt5.shutdown()
+                    time.sleep(1)  # Give it time to shut down properly
+                except:
+                    pass  # Ignore errors during shutdown
+
+                # Now try to initialize again
+                if not mt5.initialize():
+                    error = mt5.last_error()
+                    self._logger.log_error(
+                        level="CRITICAL",
+                        message=f"Failed to initialize MT5: {error}",
+                        exception_type="MT5Error",
+                        function="initialize",
+                        traceback="",
+                        context={"error_code": error[0], "error_message": error[1]}
+                    )
+                    return False
 
             # Connect to MT5 account
             if not self._login():
-                return False
+                # If login fails, try to reinitialize MT5 and login again
+                mt5.shutdown()
+                time.sleep(2)  # Give it more time to shut down properly
+
+                if not mt5.initialize():
+                    error = mt5.last_error()
+                    self._logger.log_error(
+                        level="CRITICAL",
+                        message=f"Failed to reinitialize MT5 after failed login: {error}",
+                        exception_type="MT5Error",
+                        function="initialize",
+                        traceback="",
+                        context={"error_code": error[0], "error_message": error[1]}
+                    )
+                    return False
+
+                # Try to login again
+                if not self._login():
+                    return False
 
             self._connected = True
             self._last_check = datetime.now()
@@ -112,6 +149,21 @@ class MT5Manager:
 
         for attempt in range(1, self._config.max_retry_attempts + 1):
             try:
+                # First check if we're already logged in
+                account_info = mt5.account_info()
+                if account_info is not None:
+                    # Already logged in
+                    self._logger.log_event(
+                        level="INFO",
+                        message="MT5 already logged in",
+                        event_type="MT5_LOGIN",
+                        component="mt5_manager",
+                        action="login",
+                        status="success"
+                    )
+                    return True
+
+                # Try to log in
                 login_result = mt5.login(
                     login=mt5_config.login,
                     password=mt5_config.password,
@@ -197,7 +249,7 @@ class MT5Manager:
         with self._connection_lock:
             # Check if we need to verify connection (not too frequent)
             now = datetime.now()
-            if self._last_check and (now - self._last_check).total_seconds() < 60:
+            if self._last_check and (now - self._last_check).total_seconds() < 30:
                 return self._connected
 
             self._last_check = now
@@ -220,7 +272,31 @@ class MT5Manager:
                         context={"error_code": error[0], "error_message": error[1]}
                     )
 
-                    # Try to reconnect
+                    # Try shutdown/reinitialize cycle
+                    try:
+                        mt5.shutdown()
+                        time.sleep(2)  # Give it time to shut down properly
+                    except:
+                        pass  # Ignore shutdown errors
+
+                    # Try to reconnect with delay
+                    self._connected = False
+                    time.sleep(3)  # Wait before attempting reconnection
+                    return self.initialize()
+
+                # Also verify that we're logged in
+                account_info = mt5.account_info()
+                if account_info is None:
+                    self._logger.log_error(
+                        level="WARNING",
+                        message="MT5 account not logged in",
+                        exception_type="MT5LoginError",
+                        function="ensure_connection",
+                        traceback="",
+                        context={}
+                    )
+
+                    # Try to login again
                     self._connected = False
                     return self.initialize()
 
