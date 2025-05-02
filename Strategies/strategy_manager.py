@@ -1,0 +1,333 @@
+# Strategies/strategy_manager.py
+from typing import Dict, List, Set, Type, Optional
+import threading
+
+from Events.events import NewBarEvent, SignalEvent
+from Events.event_bus import EventBus
+from Database.db_manager import DatabaseManager
+from Logger.logger import DBLogger
+from Config.trading_config import TimeFrame
+from Strategies.base_strategy import BaseStrategy
+
+
+class StrategyManager:
+    """
+    Manages trading strategies and routes events to them.
+
+    This class:
+    1. Registers and manages strategy instances
+    2. Subscribes to relevant events
+    3. Routes events to appropriate strategies
+    4. Processes signals from strategies
+    """
+
+    def __init__(self, event_bus: EventBus, db_manager: DatabaseManager, logger: DBLogger):
+        """
+        Initialize the strategy manager.
+
+        Args:
+            event_bus: Event bus instance
+            db_manager: Database manager instance
+            logger: Logger instance
+        """
+        self.event_bus = event_bus
+        self.db_manager = db_manager
+        self.logger = logger
+
+        # Strategy instances by symbol and name
+        self.strategies = {}  # {symbol: {strategy_name: strategy_instance}}
+
+        # Timeframe mappings
+        self.timeframe_ids = {}  # {TimeFrame: id}
+        self.timeframe_by_id = {}  # {id: TimeFrame}
+
+        # Instrument mappings
+        self.instrument_ids = {}  # {symbol: id}
+
+        # Lock for thread safety
+        self.lock = threading.RLock()
+
+        # Initialize mappings
+        self._initialize_mappings()
+
+        # Subscribe to events
+        self._subscribe_to_events()
+
+    def _initialize_mappings(self):
+        """Initialize timeframe and instrument mappings from database"""
+        try:
+            # Get all timeframes
+            timeframes = self.db_manager.get_all_timeframes()
+            for tf in timeframes:
+                # Find matching TimeFrame enum
+                for enum_tf in TimeFrame:
+                    if enum_tf.name == tf.name:
+                        self.timeframe_ids[enum_tf] = tf.id
+                        self.timeframe_by_id[tf.id] = enum_tf
+                        break
+
+            # Get all instruments
+            instruments = self.db_manager.get_all_instruments()
+            for instrument in instruments:
+                self.instrument_ids[instrument.symbol] = instrument.id
+
+            self.logger.log_event(
+                level="INFO",
+                message=f"Initialized mappings: {len(self.timeframe_ids)} timeframes, {len(self.instrument_ids)} instruments",
+                event_type="STRATEGY_MANAGER",
+                component="strategy_manager",
+                action="initialize_mappings",
+                status="success"
+            )
+
+        except Exception as e:
+            self.logger.log_error(
+                level="CRITICAL",
+                message=f"Failed to initialize mappings: {str(e)}",
+                exception_type=type(e).__name__,
+                function="_initialize_mappings",
+                traceback=str(e),
+                context={}
+            )
+            raise
+
+    def _subscribe_to_events(self):
+        """Subscribe to relevant events"""
+        try:
+            # Subscribe to new bar events
+            self.event_bus.subscribe(NewBarEvent, self._on_new_bar)
+
+            self.logger.log_event(
+                level="INFO",
+                message="Subscribed to events",
+                event_type="STRATEGY_MANAGER",
+                component="strategy_manager",
+                action="subscribe_to_events",
+                status="success"
+            )
+
+        except Exception as e:
+            self.logger.log_error(
+                level="CRITICAL",
+                message=f"Failed to subscribe to events: {str(e)}",
+                exception_type=type(e).__name__,
+                function="_subscribe_to_events",
+                traceback=str(e),
+                context={}
+            )
+            raise
+
+    def register_strategy(self, strategy_class: Type[BaseStrategy],
+                          name: str, symbol: str, timeframes: Set[TimeFrame],
+                          **kwargs) -> BaseStrategy:
+        """
+        Register a new strategy.
+
+        Args:
+            strategy_class: Strategy class to instantiate
+            name: Strategy name
+            symbol: Symbol to trade
+            timeframes: Set of timeframes to use
+            **kwargs: Additional parameters for the strategy
+
+        Returns:
+            The created strategy instance
+        """
+        with self.lock:
+            # Create strategy instance
+            strategy = strategy_class(name=name, symbol=symbol, timeframes=timeframes,
+                                      logger=self.logger, **kwargs)
+
+            # Set instrument and timeframe info
+            strategy.set_instrument_info(
+                instrument_id=self.instrument_ids.get(symbol),
+                symbol=symbol
+            )
+
+            # Create timeframe ID mapping for the strategy
+            timeframe_ids = {}
+            for tf in timeframes:
+                if tf in self.timeframe_ids:
+                    timeframe_ids[tf] = self.timeframe_ids[tf]
+
+            strategy.set_timeframe_ids(timeframe_ids)
+
+            # Store the strategy
+            if symbol not in self.strategies:
+                self.strategies[symbol] = {}
+
+            self.strategies[symbol][name] = strategy
+
+            self.logger.log_event(
+                level="INFO",
+                message=f"Registered strategy {name} for {symbol}",
+                event_type="STRATEGY_MANAGER",
+                component="strategy_manager",
+                action="register_strategy",
+                status="success",
+                details={
+                    "strategy_name": name,
+                    "symbol": symbol,
+                    "timeframes": [tf.name for tf in timeframes]
+                }
+            )
+
+            return strategy
+
+    def unregister_strategy(self, symbol: str, name: str) -> bool:
+        """
+        Unregister a strategy.
+
+        Args:
+            symbol: Symbol the strategy is trading
+            name: Strategy name
+
+        Returns:
+            True if successful, False if not found
+        """
+        with self.lock:
+            if symbol in self.strategies and name in self.strategies[symbol]:
+                del self.strategies[symbol][name]
+
+                if not self.strategies[symbol]:
+                    del self.strategies[symbol]
+
+                self.logger.log_event(
+                    level="INFO",
+                    message=f"Unregistered strategy {name} for {symbol}",
+                    event_type="STRATEGY_MANAGER",
+                    component="strategy_manager",
+                    action="unregister_strategy",
+                    status="success"
+                )
+
+                return True
+
+            return False
+
+    def get_strategy(self, symbol: str, name: str) -> Optional[BaseStrategy]:
+        """
+        Get a strategy by symbol and name.
+
+        Args:
+            symbol: Symbol the strategy is trading
+            name: Strategy name
+
+        Returns:
+            Strategy instance or None if not found
+        """
+        return self.strategies.get(symbol, {}).get(name)
+
+    def get_strategies_for_symbol(self, symbol: str) -> List[BaseStrategy]:
+        """
+        Get all strategies for a symbol.
+
+        Args:
+            symbol: Symbol to get strategies for
+
+        Returns:
+            List of strategy instances
+        """
+        return list(self.strategies.get(symbol, {}).values())
+
+    def get_all_strategies(self) -> List[BaseStrategy]:
+        """
+        Get all registered strategies.
+
+        Returns:
+            List of all strategy instances
+        """
+        all_strategies = []
+        for symbol_strategies in self.strategies.values():
+            all_strategies.extend(symbol_strategies.values())
+        return all_strategies
+
+    def _on_new_bar(self, event: NewBarEvent):
+        """
+        Handle new bar events.
+
+        Args:
+            event: New bar event
+        """
+        try:
+            # Get the symbol and timeframe
+            symbol = event.symbol
+            timeframe_id = event.timeframe_id
+
+            # Skip if we don't have the timeframe in our mapping
+            if timeframe_id not in self.timeframe_by_id:
+                return
+
+            timeframe = self.timeframe_by_id[timeframe_id]
+
+            # Skip if we don't have strategies for this symbol
+            if symbol not in self.strategies:
+                return
+
+            # Get all strategies for this symbol
+            symbol_strategies = self.strategies[symbol]
+
+            # Get all bars for this symbol and timeframe
+            instrument_id = self.instrument_ids.get(symbol)
+            bars = self.db_manager.get_latest_bars(instrument_id, timeframe_id)
+
+            if not bars or len(bars) < 2:
+                return
+
+            # Process each strategy
+            for strategy_name, strategy in symbol_strategies.items():
+                # Skip strategies that don't use this timeframe
+                if timeframe not in strategy.timeframes:
+                    continue
+
+                try:
+                    # Call the strategy's on_bar method
+                    signal = strategy.on_bar(timeframe, bars)
+
+                    # If a signal was generated, publish it
+                    if signal:
+                        self.event_bus.publish(signal)
+
+                        self.logger.log_event(
+                            level="INFO",
+                            message=f"Signal generated by {strategy_name} for {symbol} on {timeframe.name}",
+                            event_type="STRATEGY_SIGNAL",
+                            component="strategy_manager",
+                            action="process_signal",
+                            status="success",
+                            details={
+                                "strategy_name": strategy_name,
+                                "symbol": symbol,
+                                "timeframe": timeframe.name,
+                                "direction": signal.direction,
+                                "reason": signal.reason
+                            }
+                        )
+
+                except Exception as e:
+                    self.logger.log_error(
+                        level="ERROR",
+                        message=f"Error processing strategy {strategy_name} for {symbol} on {timeframe.name}: {str(e)}",
+                        exception_type=type(e).__name__,
+                        function="_on_new_bar",
+                        traceback=str(e),
+                        context={
+                            "strategy_name": strategy_name,
+                            "symbol": symbol,
+                            "timeframe": timeframe.name
+                        }
+                    )
+
+        except Exception as e:
+            self.logger.log_error(
+                level="ERROR",
+                message=f"Error handling new bar event: {str(e)}",
+                exception_type=type(e).__name__,
+                function="_on_new_bar",
+                traceback=str(e),
+                context={
+                    "event_type": "NewBarEvent",
+                    "symbol": getattr(event, "symbol", None),
+                    "timeframe_id": getattr(event, "timeframe_id", None)
+                }
+            )

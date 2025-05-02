@@ -483,36 +483,6 @@ class DataFetcher:
             )
             return False
 
-    def stop(self) -> None:
-        """Stop data fetcher"""
-        if not self._running:
-            return
-
-        try:
-            self._stop_event.set()
-            if self._fetch_thread:
-                self._fetch_thread.join(timeout=10)
-            self._running = False
-
-            self._logger.log_event(
-                level="INFO",
-                message="Data fetcher stopped",
-                event_type="DATA_FETCHER_STOP",
-                component="data_fetcher",
-                action="stop",
-                status="success"
-            )
-
-        except Exception as e:
-            self._logger.log_error(
-                level="ERROR",
-                message=f"Error stopping data fetcher: {str(e)}",
-                exception_type=type(e).__name__,
-                function="stop",
-                traceback=traceback.format_exc(),
-                context={}
-            )
-
     def _fetch_loop(self) -> None:
         """Main data fetching loop - modified to focus on connection maintenance only"""
         reconnection_count = 0

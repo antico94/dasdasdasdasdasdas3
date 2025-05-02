@@ -19,13 +19,15 @@ from Config.credentials import (
 
 
 class TimeFrame(Enum):
-    M1 = {"name": "M1", "description": "1 Minute", "minutes": 1, "mt5_timeframe": 1}
-    M5 = {"name": "M5", "description": "5 Minutes", "minutes": 5, "mt5_timeframe": 5}
-    M15 = {"name": "M15", "description": "15 Minutes", "minutes": 15, "mt5_timeframe": 15}
-    M30 = {"name": "M30", "description": "30 Minutes", "minutes": 30, "mt5_timeframe": 30}
-    H1 = {"name": "H1", "description": "1 Hour", "minutes": 60, "mt5_timeframe": 16385}
-    H4 = {"name": "H4", "description": "4 Hours", "minutes": 240, "mt5_timeframe": 16388}
-    D1 = {"name": "D1", "description": "1 Day", "minutes": 1440, "mt5_timeframe": 16408}
+    M1  = {"name": "M1", "description": "1 Minute", "minutes": 1, "mt5_timeframe": 1, "history_size": 300}
+    M5  = {"name": "M5", "description": "5 Minutes", "minutes": 5, "mt5_timeframe": 5, "history_size": 300}
+    M15 = {"name": "M15", "description": "15 Minutes", "minutes": 15, "mt5_timeframe": 15, "history_size": 300}
+    M30 = {"name": "M30", "description": "30 Minutes", "minutes": 30, "mt5_timeframe": 30, "history_size": 300}
+    H1  = {"name": "H1", "description": "1 Hour", "minutes": 60, "mt5_timeframe": 16385, "history_size": 300}
+    H4  = {"name": "H4", "description": "4 Hours", "minutes": 240, "mt5_timeframe": 16388, "history_size": 300}
+    D1  = {"name": "D1", "description": "1 Day", "minutes": 1440, "mt5_timeframe": 16408, "history_size": 300}
+    W1  = {"name": "W1", "description": "1 Week", "minutes": 10080, "mt5_timeframe": 32769, "history_size": 200}
+    MN1 = {"name": "MN1", "description": "1 Month", "minutes": 43200, "mt5_timeframe": 49153, "history_size": 150}
 
     @property
     def minutes(self):
@@ -38,6 +40,10 @@ class TimeFrame(Enum):
     @property
     def description(self):
         return self.value["description"]
+
+    @property
+    def history_size(self):
+        return self.value["history_size"]
 
 
 @dataclass
