@@ -1,14 +1,18 @@
 # trading_bot.py
 import os
-import signal
 import sys
-import threading
 import time
+import signal
+import threading
+import json
+from typing import Dict, Any, Optional
 
+from Config.trading_config import ConfigManager
 from Data.data_fetcher import DataFetcher
 from Events.event_bus import EventBus
 from Logger.logger import DBLogger
-from MT5.mt5_manager import MT5Manager
+from container import Container
+from dependency_injector.wiring import Provide, inject
 
 
 class TradingBot:
@@ -37,12 +41,8 @@ class TradingBot:
         )
         self._data_fetcher = DataFetcher()
         self._event_bus = EventBus()
-        self._mt5_manager = MT5Manager()
         self._running = False
         self._stop_event = threading.Event()
-        self._shutdown_complete_event = threading.Event()
-        self._shutdown_in_progress = False
-        self._shutdown_lock = threading.Lock()
 
     def initialize(self) -> bool:
         """Initialize the trading bot"""
@@ -109,8 +109,6 @@ class TradingBot:
 
         try:
             self._stop_event.clear()
-            self._shutdown_complete_event.clear()
-            self._shutdown_in_progress = False
 
             # Start data fetcher
             if not self._data_fetcher.start():
@@ -150,70 +148,24 @@ class TradingBot:
             return False
 
     def stop(self) -> None:
-        """Stop the trading bot with graceful shutdown of all components"""
-        # Use a lock to prevent multiple shutdown attempts
-        with self._shutdown_lock:
-            if not self._running or self._shutdown_in_progress:
-                return
-
-            self._shutdown_in_progress = True
+        """Stop the trading bot"""
+        if not self._running:
+            return
 
         try:
-            self._logger.log_event(
-                level="INFO",
-                message="Initiating graceful shutdown of trading bot",
-                event_type="SYSTEM_STOP",
-                component="trading_bot",
-                action="stop",
-                status="starting"
-            )
-
-            # Signal all threads to stop
             self._stop_event.set()
 
             # Stop data fetcher
-            self._logger.log_event(
-                level="INFO",
-                message="Stopping data fetcher",
-                event_type="SYSTEM_STOP",
-                component="trading_bot",
-                action="stop_component",
-                status="progress",
-                details={"component": "data_fetcher"}
-            )
             self._data_fetcher.stop()
 
             # Stop event bus
-            self._logger.log_event(
-                level="INFO",
-                message="Stopping event bus",
-                event_type="SYSTEM_STOP",
-                component="trading_bot",
-                action="stop_component",
-                status="progress",
-                details={"component": "event_bus"}
-            )
             self._event_bus.stop()
 
-            # Shut down MT5 connection
-            self._logger.log_event(
-                level="INFO",
-                message="Shutting down MT5 connection",
-                event_type="SYSTEM_STOP",
-                component="trading_bot",
-                action="stop_component",
-                status="progress",
-                details={"component": "mt5_manager"}
-            )
-            self._mt5_manager.shutdown()
-
             self._running = False
-            self._shutdown_in_progress = False
-            self._shutdown_complete_event.set()
 
             self._logger.log_event(
                 level="INFO",
-                message="Trading bot stopped successfully",
+                message="Trading bot stopped",
                 event_type="SYSTEM_STOP",
                 component="trading_bot",
                 action="stop",
@@ -221,17 +173,14 @@ class TradingBot:
             )
 
         except Exception as e:
-            self._shutdown_in_progress = False
             self._logger.log_error(
                 level="ERROR",
-                message=f"Error during trading bot shutdown: {str(e)}",
+                message=f"Error stopping trading bot: {str(e)}",
                 exception_type=type(e).__name__,
                 function="stop",
                 traceback=str(e),
                 context={}
             )
-            # Even if there's an error, signal that shutdown is complete
-            self._shutdown_complete_event.set()
 
     def run(self) -> None:
         """Run the trading bot until stopped"""
@@ -242,74 +191,107 @@ class TradingBot:
             sys.exit(1)
 
         try:
-            # Print banner
-            print("\n" + "=" * 80)
-            print(" Trading Bot Running - Press Ctrl+C to stop gracefully".center(80))
-            print("=" * 80 + "\n")
-
             # Keep the main thread alive
             while not self._stop_event.is_set():
-                time.sleep(0.5)
+                time.sleep(1)
 
         except KeyboardInterrupt:
-            # This should not be needed as signal handler will catch it,
-            # but added as a fallback
-            print("\nKeyboard interrupt received. Shutting down...")
-            self.stop()
+            pass
         finally:
-            # Wait for shutdown to complete with timeout
-            if not self._shutdown_complete_event.wait(timeout=30):
-                self._logger.log_error(
-                    level="CRITICAL",
-                    message="Shutdown timed out after 30 seconds",
-                    exception_type="ShutdownError",
-                    function="run",
-                    traceback="",
-                    context={}
-                )
-                print("\nWARNING: Shutdown timed out after 30 seconds. Forcing exit.")
+            self.stop()
 
     def _signal_handler(self, sig, frame) -> None:
-        """Handle termination signals with graceful shutdown"""
-        # Prevent the default KeyboardInterrupt traceback
-        signal_name = "SIGINT" if sig == signal.SIGINT else "SIGTERM"
-
-        print(f"\n{signal_name} received. Initiating graceful shutdown (this may take a moment)...")
-
+        """Handle termination signals"""
         self._logger.log_event(
             level="INFO",
-            message=f"Received signal {signal_name}, shutting down gracefully",
+            message=f"Received signal {sig}, shutting down",
             event_type="SYSTEM_SIGNAL",
             component="trading_bot",
             action="signal_handler",
             status="process"
         )
-
-        # Initiate graceful shutdown
         self.stop()
 
-        # Wait for shutdown to complete with timeout
-        if not self._shutdown_complete_event.wait(timeout=20):
-            self._logger.log_error(
-                level="WARNING",
-                message=f"Graceful shutdown taking longer than expected after {signal_name}",
-                exception_type="ShutdownDelayError",
-                function="_signal_handler",
-                traceback="",
-                context={"signal": signal_name}
-            )
-            print("\nShutdown is taking longer than expected. Please wait...")
 
-            # Give it a bit more time
-            if not self._shutdown_complete_event.wait(timeout=10):
-                self._logger.log_error(
-                    level="CRITICAL",
-                    message="Shutdown timed out after 30 seconds",
-                    exception_type="ShutdownError",
-                    function="_signal_handler",
-                    traceback="",
-                    context={"signal": signal_name}
-                )
-                print("\nWARNING: Shutdown timed out after 30 seconds. Forcing exit.")
-                # Exit non-zero to indicate error
-                os._exit(1)
+def configure_container() -> Container:
+    """Configure and initialize container"""
+    container = Container()
+
+    # Load configuration from file
+    config_path = os.environ.get('CONFIG_PATH', 'trading_config.json')
+    config_manager = ConfigManager()
+
+    if not os.path.exists(config_path):
+        # Create default config if not exists
+        config_manager.save_default_config(config_path)
+        print(f"Created default configuration at: {config_path}")
+
+    # Load configuration
+    config_manager.load_from_file(config_path)
+
+    # Configure container using credentials directly
+    from Config.credentials import (
+        SQL_SERVER,
+        SQL_DATABASE,
+        SQL_DRIVER,
+        USE_WINDOWS_AUTH
+    )
+
+    container.config.from_dict({
+        'db': {
+            'server': SQL_SERVER,
+            'database': SQL_DATABASE,
+            'driver': SQL_DRIVER,
+            'trusted_connection': USE_WINDOWS_AUTH
+        },
+        'logging': {
+            'enabled_levels': {'INFO', 'WARNING', 'ERROR', 'CRITICAL'},
+            'console_output': True,
+            'max_records': 10000,
+            'color_scheme': {
+                'DEBUG': '\033[37m',  # White
+                'INFO': '\033[36m',  # Cyan
+                'WARNING': '\033[33m',  # Yellow
+                'ERROR': '\033[31m',  # Red
+                'CRITICAL': '\033[41m',  # Red background
+            }
+        }
+    })
+
+    return container
+
+
+@inject
+def main(logger=Provide[Container.db_logger]) -> None:
+    """Main entry point for the trading bot"""
+
+    logger.log_event(
+        level="INFO",
+        message="Starting trading bot application",
+        event_type="SYSTEM_STARTUP",
+        component="main",
+        action="initialize",
+        status="starting",
+        details={"version": "1.0.0"}
+    )
+
+    # Create and run trading bot
+    bot = TradingBot()
+    bot.run()
+
+    logger.log_event(
+        level="INFO",
+        message="Trading bot application exiting",
+        event_type="SYSTEM_SHUTDOWN",
+        component="main",
+        action="exit",
+        status="success"
+    )
+
+
+if __name__ == "__main__":
+    container = configure_container()
+    container.wire(modules=[__name__])
+
+    # Run main application
+    main()
