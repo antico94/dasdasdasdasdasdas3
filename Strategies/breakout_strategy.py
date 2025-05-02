@@ -1,12 +1,13 @@
 # Strategies/breakout_strategy.py
 from typing import Dict, Any, List, Optional
 import numpy as np
-from datetime import datetime, time
+from datetime import datetime
 
 from Events.events import SignalEvent
 from Database.models import PriceBar
 from Config.trading_config import TimeFrame
 from Strategies.base_strategy import BaseStrategy
+from Strategies.indicator_utils import IndicatorUtils
 
 
 class BreakoutStrategy(BaseStrategy):
@@ -77,133 +78,42 @@ class BreakoutStrategy(BaseStrategy):
         bars = self.get_completed_bars(timeframe)
 
         # Ensure we have enough bars
-        if len(bars) < max(self.donchian_period, self.bollinger_period, self.atr_period, self.adx_period) + 10:
+        required_bars = max(self.donchian_period, self.bollinger_period, self.atr_period, self.adx_period) + 10
+        if len(bars) < required_bars:
             return
 
         # Convert to numpy arrays
         arrays = self.get_bars_as_arrays(timeframe)
 
-        # Calculate Donchian channel
-        if len(arrays['high']) >= self.donchian_period:
-            donchian_upper = np.zeros(len(arrays['high']))
-            donchian_lower = np.zeros(len(arrays['high']))
-
-            for i in range(self.donchian_period - 1, len(arrays['high'])):
-                donchian_upper[i] = np.max(arrays['high'][i - self.donchian_period + 1:i + 1])
-                donchian_lower[i] = np.min(arrays['low'][i - self.donchian_period + 1:i + 1])
-
-            self.set_indicator(timeframe, 'donchian_upper', donchian_upper)
-            self.set_indicator(timeframe, 'donchian_lower', donchian_lower)
+        # Calculate Donchian Channels
+        upper, middle, lower = IndicatorUtils.donchian_channel(
+            arrays['high'], arrays['low'], self.donchian_period
+        )
+        self.set_indicator(timeframe, 'donchian_upper', upper)
+        self.set_indicator(timeframe, 'donchian_lower', lower)
+        self.set_indicator(timeframe, 'donchian_middle', middle)
 
         # Calculate Bollinger Bands
-        if len(arrays['close']) >= self.bollinger_period:
-            # Calculate rolling mean
-            ma = np.zeros(len(arrays['close']))
-            for i in range(self.bollinger_period - 1, len(arrays['close'])):
-                ma[i] = np.mean(arrays['close'][i - self.bollinger_period + 1:i + 1])
-
-            # Calculate rolling standard deviation
-            std = np.zeros(len(arrays['close']))
-            for i in range(self.bollinger_period - 1, len(arrays['close'])):
-                std[i] = np.std(arrays['close'][i - self.bollinger_period + 1:i + 1], ddof=1)
-
-            # Calculate bands
-            upper = ma + (std * self.bollinger_deviation)
-            lower = ma - (std * self.bollinger_deviation)
-
-            self.set_indicator(timeframe, 'bollinger_ma', ma)
-            self.set_indicator(timeframe, 'bollinger_upper', upper)
-            self.set_indicator(timeframe, 'bollinger_lower', lower)
+        upper, middle, lower = IndicatorUtils.bollinger_bands(
+            arrays['close'], self.bollinger_period, self.bollinger_deviation
+        )
+        self.set_indicator(timeframe, 'bollinger_upper', upper)
+        self.set_indicator(timeframe, 'bollinger_ma', middle)  # Use bollinger_ma for consistency with test
+        self.set_indicator(timeframe, 'bollinger_lower', lower)
 
         # Calculate ATR
-        if len(arrays['high']) >= self.atr_period:
-            tr = np.zeros(len(arrays['high']))
+        atr = IndicatorUtils.atr(
+            arrays['high'], arrays['low'], arrays['close'], self.atr_period
+        )
+        self.set_indicator(timeframe, 'atr', atr)
 
-            # First TR value is simply high - low
-            tr[0] = arrays['high'][0] - arrays['low'][0]
-
-            # Calculate TR for remaining periods
-            for i in range(1, len(arrays['high'])):
-                hl = arrays['high'][i] - arrays['low'][i]
-                hc = abs(arrays['high'][i] - arrays['close'][i - 1])
-                lc = abs(arrays['low'][i] - arrays['close'][i - 1])
-                tr[i] = max(hl, hc, lc)
-
-            # Calculate ATR
-            atr = np.zeros(len(arrays['high']))
-            atr[self.atr_period - 1] = np.mean(tr[:self.atr_period])
-
-            # Calculate smoothed ATR
-            for i in range(self.atr_period, len(arrays['high'])):
-                atr[i] = (atr[i - 1] * (self.atr_period - 1) + tr[i]) / self.atr_period
-
-            self.set_indicator(timeframe, 'atr', atr)
-
-        # Calculate ADX (simplified version)
-        if len(arrays['high']) >= self.adx_period * 2:
-            # This is a simplified ADX calculation that reflects the general strength
-            # For a complete ADX calculation, a more comprehensive implementation would be needed
-            plus_dm = np.zeros(len(arrays['high']))
-            minus_dm = np.zeros(len(arrays['high']))
-
-            for i in range(1, len(arrays['high'])):
-                up_move = arrays['high'][i] - arrays['high'][i - 1]
-                down_move = arrays['low'][i - 1] - arrays['low'][i]
-
-                if up_move > down_move and up_move > 0:
-                    plus_dm[i] = up_move
-                else:
-                    plus_dm[i] = 0
-
-                if down_move > up_move and down_move > 0:
-                    minus_dm[i] = down_move
-                else:
-                    minus_dm[i] = 0
-
-            # Smooth DM values
-            smoothed_plus_dm = np.zeros(len(arrays['high']))
-            smoothed_minus_dm = np.zeros(len(arrays['high']))
-
-            smoothed_plus_dm[self.adx_period - 1] = np.sum(plus_dm[:self.adx_period])
-            smoothed_minus_dm[self.adx_period - 1] = np.sum(minus_dm[:self.adx_period])
-
-            for i in range(self.adx_period, len(arrays['high'])):
-                smoothed_plus_dm[i] = smoothed_plus_dm[i - 1] - (smoothed_plus_dm[i - 1] / self.adx_period) + plus_dm[i]
-                smoothed_minus_dm[i] = smoothed_minus_dm[i - 1] - (smoothed_minus_dm[i - 1] / self.adx_period) + \
-                                       minus_dm[i]
-
-            # Calculate DI values
-            tr_sum = np.zeros(len(arrays['high']))
-            tr_sum[self.adx_period - 1] = np.sum(tr[:self.adx_period])
-
-            for i in range(self.adx_period, len(arrays['high'])):
-                tr_sum[i] = tr_sum[i - 1] - (tr_sum[i - 1] / self.adx_period) + tr[i]
-
-            plus_di = np.zeros(len(arrays['high']))
-            minus_di = np.zeros(len(arrays['high']))
-
-            for i in range(self.adx_period - 1, len(arrays['high'])):
-                if tr_sum[i] > 0:
-                    plus_di[i] = 100 * smoothed_plus_dm[i] / tr_sum[i]
-                    minus_di[i] = 100 * smoothed_minus_dm[i] / tr_sum[i]
-
-            # Calculate DX
-            dx = np.zeros(len(arrays['high']))
-
-            for i in range(self.adx_period - 1, len(arrays['high'])):
-                if plus_di[i] + minus_di[i] > 0:
-                    dx[i] = 100 * abs(plus_di[i] - minus_di[i]) / (plus_di[i] + minus_di[i])
-
-            # Calculate ADX
-            adx = np.zeros(len(arrays['high']))
-            adx[2 * self.adx_period - 1] = np.mean(dx[self.adx_period - 1:2 * self.adx_period])
-
-            for i in range(2 * self.adx_period, len(arrays['high'])):
-                adx[i] = (adx[i - 1] * (self.adx_period - 1) + dx[i]) / self.adx_period
-
-            self.set_indicator(timeframe, 'adx', adx)
-            self.set_indicator(timeframe, 'plus_di', plus_di)
-            self.set_indicator(timeframe, 'minus_di', minus_di)
+        # Calculate ADX
+        adx, plus_di, minus_di = IndicatorUtils.adx(
+            arrays['high'], arrays['low'], arrays['close'], self.adx_period
+        )
+        self.set_indicator(timeframe, 'adx', adx)
+        self.set_indicator(timeframe, 'plus_di', plus_di)
+        self.set_indicator(timeframe, 'minus_di', minus_di)
 
     def calculate_signals(self, timeframe: TimeFrame) -> Optional[SignalEvent]:
         """
@@ -224,7 +134,7 @@ class BreakoutStrategy(BaseStrategy):
             return None
 
         # Check if in valid trading session
-        if not self._is_valid_session(bars[-1].timestamp):
+        if self.session_filter and not IndicatorUtils.is_valid_session(bars[-1].timestamp, self.session_filter):
             return None
 
         # Check for breakout signal
@@ -249,40 +159,6 @@ class BreakoutStrategy(BaseStrategy):
             stop_loss=stop_loss,
             take_profit=take_profit
         )
-
-    def _is_valid_session(self, timestamp: datetime) -> bool:
-        """
-        Check if the current time is within the valid trading session.
-
-        Args:
-            timestamp: The timestamp to check
-
-        Returns:
-            True if within valid session, False otherwise
-        """
-        if not self.session_filter:
-            return True
-
-        # Extract hour for session filtering
-        hour = timestamp.hour
-
-        if self.session_filter == "london":
-            # London session: 7:00-16:00 UTC
-            return 7 <= hour < 16
-        elif self.session_filter == "new_york":
-            # New York session: 12:00-21:00 UTC
-            return 12 <= hour < 21
-        elif self.session_filter == "london_new_york":
-            # London + New York overlap: 12:00-16:00 UTC
-            return 12 <= hour < 16
-        elif self.session_filter == "tokyo":
-            # Tokyo session: 0:00-9:00 UTC
-            return 0 <= hour < 9
-        elif self.session_filter == "tokyo_ny_overlap":
-            # Tokyo + New York overlap: 8:00-12:00 UTC
-            return 8 <= hour < 12
-
-        return True
 
     def _check_breakout(self, timeframe: TimeFrame) -> int:
         """
