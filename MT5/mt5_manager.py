@@ -2,7 +2,7 @@
 import MetaTrader5 as mt5
 import time
 from typing import Dict, List, Any, Optional, Tuple
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import threading
 import sys
 
@@ -384,6 +384,10 @@ class MT5Manager:
         try:
             mt5_timeframe = timeframe.mt5_timeframe
 
+            # Ensure from_date is timezone-aware before sending to MT5
+            if from_date.tzinfo is None:
+                from_date = from_date.replace(tzinfo=timezone.utc)
+
             # Copy rates
             rates = mt5.copy_rates_from(symbol, mt5_timeframe, from_date, count)
 
@@ -410,7 +414,7 @@ class MT5Manager:
             result = []
             for rate in rates:
                 rate_dict = {
-                    "time": datetime.fromtimestamp(rate[0]),
+                    "time": datetime.fromtimestamp(rate[0], tz=timezone.utc).replace(tzinfo=None),
                     "open": rate[1],
                     "high": rate[2],
                     "low": rate[3],
@@ -443,6 +447,13 @@ class MT5Manager:
         try:
             mt5_timeframe = timeframe.mt5_timeframe
 
+            # Ensure from_date and to_date are timezone-aware before sending to MT5
+            if from_date.tzinfo is None:
+                from_date = from_date.replace(tzinfo=timezone.utc)
+
+            if to_date.tzinfo is None:
+                to_date = to_date.replace(tzinfo=timezone.utc)
+
             # Copy rates
             rates = mt5.copy_rates_range(symbol, mt5_timeframe, from_date, to_date)
 
@@ -469,7 +480,7 @@ class MT5Manager:
             result = []
             for rate in rates:
                 rate_dict = {
-                    "time": datetime.fromtimestamp(rate[0]),
+                    "time": datetime.fromtimestamp(rate[0], tz=timezone.utc).replace(tzinfo=None),
                     "open": rate[1],
                     "high": rate[2],
                     "low": rate[3],
@@ -481,7 +492,6 @@ class MT5Manager:
                 result.append(rate_dict)
 
             return result
-
         except Exception as e:
             self._logger.log_error(
                 level="ERROR",
@@ -547,3 +557,72 @@ class MT5Manager:
                 context={"symbol": symbol}
             )
             return False
+
+    def get_server_time(self) -> Optional[datetime]:
+        """Get current MT5 server time"""
+        if not self.ensure_connection():
+            return None
+
+        try:
+            # Get symbol info for any available symbol to extract server time
+            symbols = mt5.symbols_get()
+            if not symbols:
+                self._logger.log_error(
+                    level="ERROR",
+                    message="No symbols available to get server time",
+                    exception_type="MT5DataError",
+                    function="get_server_time",
+                    traceback="",
+                    context={}
+                )
+                return None
+
+            # Get the first symbol's latest tick to get server time
+            symbol = symbols[0].name
+            last_tick = mt5.symbol_info_tick(symbol)
+
+            if not last_tick:
+                self._logger.log_error(
+                    level="ERROR",
+                    message=f"Failed to get latest tick for {symbol}",
+                    exception_type="MT5DataError",
+                    function="get_server_time",
+                    traceback="",
+                    context={"symbol": symbol}
+                )
+                return None
+
+            # Get time from the tick (server time)
+            server_time = datetime.fromtimestamp(last_tick.time, tz=timezone.utc).replace(tzinfo=None)
+
+            return server_time
+
+        except Exception as e:
+            self._logger.log_error(
+                level="ERROR",
+                message=f"Error getting MT5 server time: {str(e)}",
+                exception_type=type(e).__name__,
+                function="get_server_time",
+                traceback=str(e),
+                context={}
+            )
+            return None
+
+    def get_symbol_info(self, symbol: str) -> Optional[Any]:
+        """Get symbol information from MT5"""
+        if not self.ensure_connection():
+            return None
+
+        try:
+            symbol_info = mt5.symbol_info(symbol)
+            return symbol_info
+        except Exception as e:
+            self._logger.log_error(
+                level="ERROR",
+                message=f"Error getting symbol info for {symbol}: {str(e)}",
+                exception_type=type(e).__name__,
+                function="get_symbol_info",
+                traceback=str(e),
+                context={"symbol": symbol}
+            )
+            return None

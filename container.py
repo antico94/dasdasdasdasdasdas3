@@ -4,6 +4,10 @@ from Logger.logger import DBLogger
 from Config.logging_config import LoggingConfig
 from Config.db_config import DatabaseConfig
 from Database.db_session import DatabaseSession
+from Data.data_fetcher import DataFetcher
+from Events.event_bus import EventBus
+from MT5.mt5_manager import MT5Manager
+from Data.scheduled_updates import TimeframeUpdateScheduler
 
 
 class Container(containers.DeclarativeContainer):
@@ -22,7 +26,8 @@ class Container(containers.DeclarativeContainer):
 
     # Create connection string for SQLAlchemy
     db_connection_string = providers.Callable(
-        lambda config: f"mssql+pyodbc://{config.server}/{config.database}?driver={config.driver.replace(' ', '+')}&trusted_connection={'yes' if config.trusted_connection else 'no'}",
+        lambda
+            config: f"mssql+pyodbc://{config.server}/{config.database}?driver={config.driver.replace(' ', '+')}&trusted_connection={'yes' if config.trusted_connection else 'no'}",
         config=db_config
     )
 
@@ -49,4 +54,27 @@ class Container(containers.DeclarativeContainer):
         enabled_levels=config.logging.enabled_levels,
         console_output=config.logging.console_output,
         color_scheme=config.logging.color_scheme
+    )
+
+    # MT5 Manager
+    mt5_manager = providers.Singleton(
+        MT5Manager
+    )
+
+    # Event Bus
+    event_bus = providers.Singleton(
+        EventBus
+    )
+
+    # Data Fetcher
+    data_fetcher = providers.Singleton(
+        DataFetcher
+    )
+
+    # Timeframe Update Scheduler
+    timeframe_scheduler = providers.Singleton(
+        TimeframeUpdateScheduler,
+        data_fetcher=data_fetcher,
+        mt5_manager=mt5_manager,
+        logger=db_logger
     )

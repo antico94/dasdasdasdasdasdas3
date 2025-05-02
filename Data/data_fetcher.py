@@ -1,6 +1,5 @@
-# Data/data_fetcher.py
+from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Any, Optional
-from datetime import datetime, timedelta
 import threading
 import time
 import traceback
@@ -400,16 +399,17 @@ class DataFetcher:
 
     def _convert_to_price_bars(self, mt5_data: List[Dict[str, Any]], instrument_id: int, timeframe_id: int) -> List[
         PriceBar]:
-        """Convert MT5 data to price bars"""
+        """Convert MT5 data to price bars using UTC timestamps"""
         bars = []
         for rate in mt5_data:
             # Check if rate is a numpy structured array or a dict
             if hasattr(rate, 'dtype') and hasattr(rate, '__getitem__'):
-                # Convert from numpy array
+                # Convert from numpy array - use fromtimestamp with UTC
+                timestamp = datetime.fromtimestamp(float(rate[0]), tz=timezone.utc).replace(tzinfo=None)
                 bar = PriceBar(
                     instrument_id=int(instrument_id),
                     timeframe_id=int(timeframe_id),
-                    timestamp=datetime.fromtimestamp(float(rate[0])),  # time
+                    timestamp=timestamp,  # UTC timestamp
                     open=float(rate[1]),  # open
                     high=float(rate[2]),  # high
                     low=float(rate[3]),  # low
@@ -419,10 +419,17 @@ class DataFetcher:
                 )
             else:
                 # Convert from dict
+                if isinstance(rate["time"], datetime):
+                    # If already a datetime, ensure it's treated as UTC
+                    timestamp = rate["time"].replace(tzinfo=timezone.utc).replace(tzinfo=None)
+                else:
+                    # Otherwise assume timestamp is UTC
+                    timestamp = datetime.fromtimestamp(rate["time"], tz=timezone.utc).replace(tzinfo=None)
+
                 bar = PriceBar(
                     instrument_id=int(instrument_id),
                     timeframe_id=int(timeframe_id),
-                    timestamp=rate["time"],
+                    timestamp=timestamp,
                     open=float(rate["open"]),
                     high=float(rate["high"]),
                     low=float(rate["low"]),
@@ -507,7 +514,7 @@ class DataFetcher:
             )
 
     def _fetch_loop(self) -> None:
-        """Main data fetching loop"""
+        """Main data fetching loop - modified to focus on connection maintenance only"""
         reconnection_count = 0
         max_reconnection_attempts = 5
         reconnection_cooldown = 60  # seconds
@@ -548,30 +555,28 @@ class DataFetcher:
                             reconnection_count = 0  # Reset to try again
 
                     # Skip this iteration and sleep
-                    time.sleep(self._config.sync_interval_seconds)
+                    time.sleep(5)  # Reduced sleep time for quicker retry
                     continue
 
-                # Fetch new data for all instrument/timeframe pairs
-                self._fetch_all_new_data()
+                # REMOVED: self._fetch_all_new_data()
+                # No longer fetch data in this loop - the scheduler handles this now
 
-                # Reset reconnection count if we successfully fetched data
+                # ADDED: Heartbeat log to show the system is alive
+                if time.time() % 60 < 1:  # Approximately once per minute
+                    self._logger.log_event(
+                        level="INFO",
+                        message="DataFetcher heartbeat - connection maintained",
+                        event_type="HEARTBEAT",
+                        component="data_fetcher",
+                        action="_fetch_loop",
+                        status="ok"
+                    )
+
+                # Reset reconnection count
                 reconnection_count = 0
 
-                # Calculate sleep time to maintain sync interval
-                elapsed = time.time() - start_time
-                sleep_time = max(0, self._config.sync_interval_seconds - elapsed)
-
-                if sleep_time > 0:
-                    # Sleep until next sync, but check stop event periodically
-                    for _ in range(int(sleep_time)):
-                        if self._stop_event.is_set():
-                            break
-                        time.sleep(1)
-
-                    # Handle remainder
-                    remainder = sleep_time - int(sleep_time)
-                    if remainder > 0 and not self._stop_event.is_set():
-                        time.sleep(remainder)
+                # Sleep longer since we're only maintaining connections now
+                time.sleep(5)
 
             except Exception as e:
                 self._logger.log_error(
@@ -588,8 +593,54 @@ class DataFetcher:
 
     def _fetch_all_new_data(self) -> None:
         """Fetch new data for all configured instrument/timeframe pairs"""
-        current_time = datetime.now()
+        # CRITICAL FIX: Don't use system UTC time, instead get MT5 server time
+        try:
+            # Get the current MT5 server time
+            mt5_server_time = self._mt5_manager.get_server_time()
+            if mt5_server_time:
+                current_time = mt5_server_time
+                self._logger.log_event(
+                    level="INFO",
+                    message=f"Using MT5 server time for sync: {current_time.isoformat()}",
+                    event_type="DATA_SYNC",
+                    component="data_fetcher",
+                    action="_fetch_all_new_data",
+                    status="using_mt5_time"
+                )
+            else:
+                # Fallback to system time but add 6 hours offset (adjust this based on your specific offset)
+                current_time = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(hours=6)
+                self._logger.log_event(
+                    level="WARNING",
+                    message=f"MT5 server time not available, using adjusted system time with +6h offset: {current_time.isoformat()}",
+                    event_type="DATA_SYNC",
+                    component="data_fetcher",
+                    action="_fetch_all_new_data",
+                    status="using_adjusted_time"
+                )
+        except Exception as e:
+            # Last resort fallback
+            current_time = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(hours=6)
+            self._logger.log_error(
+                level="ERROR",
+                message=f"Error getting MT5 server time, using adjusted system time: {str(e)}",
+                exception_type=type(e).__name__,
+                function="_fetch_all_new_data",
+                traceback=traceback.format_exc(),
+                context={"adjusted_time": current_time.isoformat()}
+            )
 
+        # Add debug log
+        self._logger.log_event(
+            level="INFO",
+            message=f"Starting data sync with reference time: {current_time.isoformat()}",
+            event_type="DATA_SYNC",
+            component="data_fetcher",
+            action="_fetch_all_new_data",
+            status="starting"
+        )
+
+        # Rest of the method continues as before
         for (symbol, timeframe), mapping in self._instrument_timeframe_map.items():
             try:
                 instrument_id = mapping["instrument_id"]
@@ -612,18 +663,79 @@ class DataFetcher:
                 # Calculate time difference between now and latest bar
                 time_difference_minutes = (current_time - latest_timestamp).total_seconds() / 60
 
-                # If difference is more than the timeframe period, fetch data
-                # We also fetch if the difference is less than a timeframe to update the current bar
-                if time_difference_minutes > 0:
-                    # Fetch several periods back to ensure we get all missing bars
+                # Add detailed debug logs for time comparison
+                self._logger.log_event(
+                    level="INFO",
+                    message=f"Time comparison for {symbol}/{timeframe.name}: " +
+                            f"current={current_time.isoformat()}, " +
+                            f"latest={latest_timestamp.isoformat()}, " +
+                            f"diff={time_difference_minutes:.2f} minutes",
+                    event_type="DATA_SYNC",
+                    component="data_fetcher",
+                    action="_fetch_all_new_data",
+                    status="debug",
+                    details={
+                        "symbol": symbol,
+                        "timeframe": timeframe.name,
+                        "current_time": current_time.isoformat(),
+                        "latest_timestamp": latest_timestamp.isoformat(),
+                        "time_difference_minutes": time_difference_minutes,
+                        "timeframe_minutes": minutes
+                    }
+                )
+
+                # ALWAYS force an update for M1 timeframes regardless of time comparison
+                # This ensures we always get the latest data for fast-changing charts
+                if timeframe.minutes == 1:
+                    needs_update = True
+                    self._logger.log_event(
+                        level="INFO",
+                        message=f"Forcing update for M1 timeframe {symbol}",
+                        event_type="DATA_SYNC",
+                        component="data_fetcher",
+                        action="_fetch_all_new_data",
+                        status="forcing_update",
+                        details={"symbol": symbol, "timeframe": timeframe.name}
+                    )
+                else:
+                    # For other timeframes, use smarter logic
+                    # If time difference is positive (current > latest) and greater than 0.5 * timeframe period
+                    # OR if it's negative but within a reasonable window (for clock skew)
+                    # then update
+                    needs_update = (time_difference_minutes > 0 and time_difference_minutes > 0.5 * minutes) or \
+                                   (time_difference_minutes < 0 and time_difference_minutes > -10 * minutes)
+
+                # Additionally, force update for M5 timeframes frequently
+                if timeframe.minutes == 5:
+                    needs_update = True
+
+                # Log the decision
+                self._logger.log_event(
+                    level="INFO",
+                    message=f"Update {'needed' if needs_update else 'not needed'} for {symbol}/{timeframe.name}",
+                    event_type="DATA_SYNC",
+                    component="data_fetcher",
+                    action="_fetch_all_new_data",
+                    status="update_decision",
+                    details={
+                        "symbol": symbol,
+                        "timeframe": timeframe.name,
+                        "needs_update": needs_update,
+                        "time_diff_minutes": time_difference_minutes
+                    }
+                )
+
+                # If update is needed, fetch data
+                if needs_update:
+                    # Use a generous lookback to ensure we get all missing bars
                     # Use a slightly earlier start time to ensure we catch the beginning of the period
-                    lookback_periods = max(3, int(time_difference_minutes / minutes) + 1)
+                    lookback_periods = max(3, int(abs(time_difference_minutes) / minutes) + 2)
                     from_date = current_time - timedelta(minutes=minutes * lookback_periods)
 
                     # Log the synchronization attempt
                     self._logger.log_event(
                         level="INFO",
-                        message=f"Syncing data for {symbol}/{timeframe.name} from {from_date} to now",
+                        message=f"Syncing data for {symbol}/{timeframe.name} from {from_date} to {current_time}",
                         event_type="DATA_SYNC",
                         component="data_fetcher",
                         action="_fetch_all_new_data",
@@ -705,6 +817,21 @@ class DataFetcher:
                             for bar in bars:
                                 event = NewBarEvent(instrument_id, timeframe_id, bar, symbol, timeframe.name)
                                 self._event_bus.publish(event)
+                        else:
+                            self._logger.log_event(
+                                level="WARNING",
+                                message=f"No bars produced from MT5 data for {symbol}/{timeframe.name}",
+                                event_type="DATA_FETCH",
+                                component="data_fetcher",
+                                action="_fetch_all_new_data",
+                                status="warning",
+                                details={
+                                    "symbol": symbol,
+                                    "timeframe": timeframe.name,
+                                    "from_date": from_date.isoformat(),
+                                    "to_date": current_time.isoformat()
+                                }
+                            )
                     else:
                         self._logger.log_event(
                             level="WARNING",
@@ -720,6 +847,22 @@ class DataFetcher:
                                 "to_date": current_time.isoformat()
                             }
                         )
+                else:
+                    self._logger.log_event(
+                        level="INFO",
+                        message=f"No update needed for {symbol}/{timeframe.name}",
+                        event_type="DATA_SYNC",
+                        component="data_fetcher",
+                        action="_fetch_all_new_data",
+                        status="skipped",
+                        details={
+                            "symbol": symbol,
+                            "timeframe": timeframe.name,
+                            "latest_timestamp": latest_timestamp.isoformat(),
+                            "current_time": current_time.isoformat(),
+                            "time_difference_minutes": time_difference_minutes
+                        }
+                    )
 
             except Exception as e:
                 self._logger.log_error(
@@ -829,7 +972,8 @@ class DataFetcher:
 
     def force_sync(self, symbol: Optional[str] = None, timeframe: Optional[TimeFrame] = None) -> bool:
         """Force immediate synchronization for specific or all instruments/timeframes"""
-        current_time = datetime.now()
+        # Use UTC for consistent time comparison
+        current_time = datetime.now(timezone.utc).replace(tzinfo=None)
 
         try:
             if symbol and timeframe:
@@ -870,7 +1014,19 @@ class DataFetcher:
                                      PriceBar.timeframe_id == timeframe_id)) \
                         .scalar()
 
-                if latest_timestamp is None:
+                # Modified approach: For M1 and M5, always use copy_rates_from_pos
+                if timeframe.minutes <= 5:  # M1 and M5
+                    # For small timeframes, always get the most recent data
+                    mt5_data = self._mt5_manager.copy_rates_from_pos(symbol, timeframe, 0, 100)
+                    self._logger.log_event(
+                        level="INFO",
+                        message=f"Using direct MT5 data fetch for {symbol}/{timeframe.name}",
+                        event_type="DATA_SYNC",
+                        component="data_fetcher",
+                        action="force_sync",
+                        status="direct_fetch"
+                    )
+                elif latest_timestamp is None:
                     # No data yet, load initial data
                     mt5_data = self._mt5_manager.copy_rates_from_pos(symbol, timeframe, 0, history_size)
                 else:
@@ -976,7 +1132,17 @@ class DataFetcher:
                     status="starting"
                 )
 
-                self._fetch_all_new_data()
+                # First sync M1 and M5 timeframes using direct fetching
+                for (symbol, timeframe), mapping in self._instrument_timeframe_map.items():
+                    if timeframe.minutes <= 5:
+                        # For M1 and M5, use direct fetch
+                        self.force_sync(symbol, timeframe)
+                        time.sleep(0.2)  # Small pause between operations
+
+                # Then sync other timeframes normally
+                for (symbol, timeframe), mapping in self._instrument_timeframe_map.items():
+                    if timeframe.minutes > 5:
+                        self._fetch_all_new_data()
 
                 self._logger.log_event(
                     level="INFO",
@@ -1114,3 +1280,168 @@ class DataFetcher:
             )
             # Mark as not running even if there was an error
             self._running = False
+
+    def check_mt5_data_vs_db(self, symbol: str, timeframe: TimeFrame) -> None:
+        """Debug function to directly check MT5 data against database"""
+        try:
+            # Get latest timestamp from database
+            instrument_id = None
+            timeframe_id = None
+
+            # Find IDs
+            key = (symbol, timeframe)
+            if key in self._instrument_timeframe_map:
+                mapping = self._instrument_timeframe_map[key]
+                instrument_id = mapping["instrument_id"]
+                timeframe_id = mapping["timeframe_id"]
+            else:
+                self._logger.log_error(
+                    level="ERROR",
+                    message=f"Invalid instrument/timeframe combination: {symbol}/{timeframe.name}",
+                    exception_type="ConfigError",
+                    function="check_mt5_data_vs_db",
+                    traceback="",
+                    context={"symbol": symbol, "timeframe": timeframe.name}
+                )
+                return
+
+            # Get latest DB timestamp
+            latest_timestamp = None
+            with self._db_session.session_scope() as session:
+                latest_timestamp = session.query(func.max(PriceBar.timestamp)) \
+                    .filter(and_(PriceBar.instrument_id == instrument_id,
+                                 PriceBar.timeframe_id == timeframe_id)) \
+                    .scalar()
+
+            if latest_timestamp is None:
+                self._logger.log_event(
+                    level="WARNING",
+                    message=f"No data in database for {symbol}/{timeframe.name}",
+                    event_type="DEBUG",
+                    component="data_fetcher",
+                    action="check_mt5_data_vs_db",
+                    status="no_data",
+                    details={"symbol": symbol, "timeframe": timeframe.name}
+                )
+                return
+
+            # Get latest bar from MT5 directly (just 1 bar)
+            mt5_data = self._mt5_manager.copy_rates_from_pos(symbol, timeframe, 0, 1)
+
+            if not mt5_data or len(mt5_data) == 0:
+                self._logger.log_event(
+                    level="ERROR",
+                    message=f"No data returned from MT5 for {symbol}/{timeframe.name} in direct check",
+                    event_type="DEBUG",
+                    component="data_fetcher",
+                    action="check_mt5_data_vs_db",
+                    status="mt5_error",
+                    details={"symbol": symbol, "timeframe": timeframe.name}
+                )
+                return
+
+            # Get MT5 timestamp
+            mt5_time = mt5_data[0]["time"]
+
+            # Log comparison
+            self._logger.log_event(
+                level="INFO",
+                message=f"MT5 vs DB comparison for {symbol}/{timeframe.name}: " +
+                        f"MT5 latest={mt5_time.isoformat()}, " +
+                        f"DB latest={latest_timestamp.isoformat()}",
+                event_type="DEBUG",
+                component="data_fetcher",
+                action="check_mt5_data_vs_db",
+                status="success",
+                details={
+                    "symbol": symbol,
+                    "timeframe": timeframe.name,
+                    "mt5_time": mt5_time.isoformat(),
+                    "db_time": latest_timestamp.isoformat(),
+                    "newer_in_mt5": mt5_time > latest_timestamp
+                }
+            )
+
+            # If MT5 has newer data, force an update
+            if mt5_time > latest_timestamp:
+                self._logger.log_event(
+                    level="INFO",
+                    message=f"MT5 has newer data for {symbol}/{timeframe.name}, forcing direct update",
+                    event_type="DEBUG",
+                    component="data_fetcher",
+                    action="check_mt5_data_vs_db",
+                    status="update_needed"
+                )
+
+                # Get some additional bars to ensure we have the latest data
+                mt5_data = self._mt5_manager.copy_rates_from_pos(symbol, timeframe, 0, 10)
+
+                if mt5_data and len(mt5_data) > 0:
+                    # Convert to price bars
+                    bars = self._convert_to_price_bars(mt5_data, instrument_id, timeframe_id)
+
+                    if bars:
+                        # Insert or update bars in database
+                        updated_count = 0
+                        inserted_count = 0
+
+                        with self._db_session.session_scope() as session:
+                            for bar in bars:
+                                # Check if bar already exists
+                                existing = session.query(PriceBar).filter(
+                                    and_(
+                                        PriceBar.instrument_id == bar.instrument_id,
+                                        PriceBar.timeframe_id == bar.timeframe_id,
+                                        PriceBar.timestamp == bar.timestamp
+                                    )
+                                ).first()
+
+                                if existing:
+                                    # Update existing record if any value is different
+                                    if (existing.open != bar.open or
+                                            existing.high != bar.high or
+                                            existing.low != bar.low or
+                                            existing.close != bar.close or
+                                            existing.volume != bar.volume or
+                                            existing.spread != bar.spread):
+                                        existing.open = bar.open
+                                        existing.high = bar.high
+                                        existing.low = bar.low
+                                        existing.close = bar.close
+                                        existing.volume = bar.volume
+                                        existing.spread = bar.spread
+                                        updated_count += 1
+                                else:
+                                    # Add new record
+                                    session.add(bar)
+                                    inserted_count += 1
+
+                        self._logger.log_event(
+                            level="INFO",
+                            message=f"Direct update completed for {symbol}/{timeframe.name}: {inserted_count} new, {updated_count} updated bars",
+                            event_type="DEBUG",
+                            component="data_fetcher",
+                            action="check_mt5_data_vs_db",
+                            status="update_success",
+                            details={
+                                "symbol": symbol,
+                                "timeframe": timeframe.name,
+                                "new_bars": inserted_count,
+                                "updated_bars": updated_count
+                            }
+                        )
+
+                        # Notify listeners of new data
+                        for bar in bars:
+                            event = NewBarEvent(instrument_id, timeframe_id, bar, symbol, timeframe.name)
+                            self._event_bus.publish(event)
+
+        except Exception as e:
+            self._logger.log_error(
+                level="ERROR",
+                message=f"Error in direct MT5 vs DB check for {symbol}/{timeframe.name}: {str(e)}",
+                exception_type=type(e).__name__,
+                function="check_mt5_data_vs_db",
+                traceback=traceback.format_exc(),
+                context={"symbol": symbol, "timeframe": timeframe.name}
+            )
