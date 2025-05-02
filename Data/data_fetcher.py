@@ -1014,29 +1014,34 @@ class DataFetcher:
                                      PriceBar.timeframe_id == timeframe_id)) \
                         .scalar()
 
-                # Modified approach: For M1 and M5, always use copy_rates_from_pos
-                if timeframe.minutes <= 5:  # M1 and M5
-                    # For small timeframes, always get the most recent data
-                    mt5_data = self._mt5_manager.copy_rates_from_pos(symbol, timeframe, 0, 100)
-                    self._logger.log_event(
-                        level="INFO",
-                        message=f"Using direct MT5 data fetch for {symbol}/{timeframe.name}",
-                        event_type="DATA_SYNC",
-                        component="data_fetcher",
-                        action="force_sync",
-                        status="direct_fetch"
-                    )
-                elif latest_timestamp is None:
-                    # No data yet, load initial data
-                    mt5_data = self._mt5_manager.copy_rates_from_pos(symbol, timeframe, 0, history_size)
+                # SIMPLIFIED APPROACH: Use direct fetch for ALL timeframes
+                # The number of bars to fetch varies by timeframe size
+                if latest_timestamp is None:
+                    # No data yet, load initial full history
+                    bars_to_fetch = history_size
                 else:
-                    # Calculate lookback period based on difference between current time and latest timestamp
-                    time_difference_minutes = (current_time - latest_timestamp).total_seconds() / 60
-                    lookback_periods = max(3, int(time_difference_minutes / minutes) + 1)
-                    from_date = current_time - timedelta(minutes=minutes * lookback_periods)
+                    # Adaptive bar count based on timeframe size
+                    if timeframe.minutes <= 5:  # M1, M5
+                        bars_to_fetch = 100
+                    elif timeframe.minutes <= 30:  # M15, M30
+                        bars_to_fetch = 50
+                    elif timeframe.minutes <= 240:  # H1, H4
+                        bars_to_fetch = 30
+                    else:  # D1 and higher
+                        bars_to_fetch = 20
 
-                    # Use copy_rates_range to get all bars in the time range
-                    mt5_data = self._mt5_manager.copy_rates_range(symbol, timeframe, from_date, current_time)
+                # Use direct fetch for ALL timeframes - this is the key change
+                mt5_data = self._mt5_manager.copy_rates_from_pos(symbol, timeframe, 0, bars_to_fetch)
+
+                self._logger.log_event(
+                    level="INFO",
+                    message=f"Using direct MT5 fetch for {symbol}/{timeframe.name}, getting {bars_to_fetch} bars",
+                    event_type="DATA_SYNC",
+                    component="data_fetcher",
+                    action="force_sync",
+                    status="direct_fetch",
+                    details={"bars_requested": bars_to_fetch}
+                )
 
                 if mt5_data and len(mt5_data) > 0:
                     # Convert to price bars
@@ -1132,17 +1137,14 @@ class DataFetcher:
                     status="starting"
                 )
 
-                # First sync M1 and M5 timeframes using direct fetching
-                for (symbol, timeframe), mapping in self._instrument_timeframe_map.items():
-                    if timeframe.minutes <= 5:
-                        # For M1 and M5, use direct fetch
-                        self.force_sync(symbol, timeframe)
-                        time.sleep(0.2)  # Small pause between operations
-
-                # Then sync other timeframes normally
-                for (symbol, timeframe), mapping in self._instrument_timeframe_map.items():
-                    if timeframe.minutes > 5:
-                        self._fetch_all_new_data()
+                # Process timeframes in order of importance
+                # First the faster timeframes, then the slower ones
+                for timeframe_minutes in [1, 5, 15, 30, 60, 240, 1440]:
+                    # Find all instruments with this timeframe
+                    for (symbol, timeframe), mapping in self._instrument_timeframe_map.items():
+                        if timeframe.minutes == timeframe_minutes:
+                            self.force_sync(symbol, timeframe)
+                            time.sleep(0.2)  # Small pause between operations
 
                 self._logger.log_event(
                     level="INFO",

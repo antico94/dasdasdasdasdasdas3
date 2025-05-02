@@ -112,12 +112,17 @@ class TimeframeUpdateScheduler:
 
     def _scheduler_loop(self) -> None:
         """Main scheduler loop"""
+        last_market_check = None
+        check_interval = 300  # 5 minutes in seconds
+
         while not self._stop_event.is_set():
             try:
-                # Check market state every 5 minutes or if we don't have state info yet
                 current_time = datetime.now()
-                if not self._market_state_cache or current_time.minute % 5 == 0:
+
+                # Check market state only on startup and then every 5 minutes
+                if last_market_check is None or (current_time - last_market_check).total_seconds() >= check_interval:
                     self._update_market_states()
+                    last_market_check = current_time
 
                 # Run pending scheduled jobs
                 self._scheduler.run_pending()
@@ -326,15 +331,19 @@ class TimeframeUpdateScheduler:
             for (symbol, _), _ in map_copy.items():
                 symbols.add(symbol)
 
-            self._logger.log_event(
-                level="INFO",
-                message=f"Checking market state for {len(symbols)} symbols",
-                event_type="MARKET_STATE",
-                component="timeframe_scheduler",
-                action="_update_market_states",
-                status="starting",
-                details={"count": len(symbols)}
-            )
+            # Only log on first run
+            first_run = not hasattr(self, '_market_state_initialized')
+            if first_run:
+                self._market_state_initialized = True
+                self._logger.log_event(
+                    level="INFO",
+                    message=f"Initializing market state for {len(symbols)} symbols",
+                    event_type="MARKET_STATE",
+                    component="timeframe_scheduler",
+                    action="_update_market_states",
+                    status="starting",
+                    details={"count": len(symbols)}
+                )
 
             # Check each symbol
             for symbol in symbols:
@@ -365,31 +374,22 @@ class TimeframeUpdateScheduler:
                 # Determine market state
                 if hasattr(symbol_info, 'trade_mode'):
                     trade_mode = symbol_info.trade_mode
+
+                    # Always treat trade_mode 4 as OPEN since we can place orders manually
                     if trade_mode == 0:  # No trading
                         state = MarketStateType.CLOSED
-                    elif trade_mode == 1:  # Only long positions
+                    elif trade_mode in [1, 2, 3, 4]:  # All trading modes including "close only"
                         state = MarketStateType.OPEN
-                    elif trade_mode == 2:  # Only short positions
-                        state = MarketStateType.OPEN
-                    elif trade_mode == 3:  # Both long and short positions
-                        state = MarketStateType.OPEN
-                    elif trade_mode == 4:  # Close only - no new positions
-                        state = MarketStateType.POST_MARKET
                     else:
                         state = MarketStateType.CLOSED
                 else:
                     # No trade_mode attribute, use session info
-                    current_time = datetime.now().time()
-
-                    # Check if current time is within trading hours
-                    # This is a simplified check - adjust based on your broker's schedule
-                    # Typical forex market hours are 24/5
                     if datetime.now().weekday() >= 5:  # Weekend
                         state = MarketStateType.CLOSED
                     else:
                         state = MarketStateType.OPEN
 
-                # Update cache and log if state changed
+                # Update cache and ONLY log if state changed
                 previous_state = self._market_state_cache.get(symbol)
                 if previous_state != state:
                     self._market_state_cache[symbol] = state
