@@ -3,6 +3,7 @@ from dependency_injector import containers, providers
 from Logger.logger import DBLogger
 from Config.logging_config import LoggingConfig
 from Config.db_config import DatabaseConfig
+from Database.db_session import DatabaseSession
 
 
 class Container(containers.DeclarativeContainer):
@@ -19,10 +20,22 @@ class Container(containers.DeclarativeContainer):
         trusted_connection=config.db.trusted_connection
     )
 
+    # Create connection string for SQLAlchemy
+    db_connection_string = providers.Callable(
+        lambda config: f"mssql+pyodbc://{config.server}/{config.database}?driver={config.driver.replace(' ', '+')}&trusted_connection={'yes' if config.trusted_connection else 'no'}",
+        config=db_config
+    )
+
+    # Database session manager
+    db_session = providers.Singleton(
+        DatabaseSession,
+        conn_string=db_connection_string
+    )
+
     # Load logging configuration
     logging_config = providers.Factory(
         LoggingConfig,
-        conn_string=db_config.provided.connection_string,
+        conn_string=db_connection_string,
         enabled_levels=config.logging.enabled_levels,
         console_output=config.logging.console_output,
         max_records=config.logging.max_records,
@@ -32,7 +45,7 @@ class Container(containers.DeclarativeContainer):
     # Create logger
     db_logger = providers.Singleton(
         DBLogger,
-        conn_string=db_config.provided.connection_string,
+        conn_string=db_connection_string,
         enabled_levels=config.logging.enabled_levels,
         console_output=config.logging.console_output,
         color_scheme=config.logging.color_scheme

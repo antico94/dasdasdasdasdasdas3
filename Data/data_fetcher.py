@@ -4,10 +4,14 @@ from datetime import datetime, timedelta
 import threading
 import time
 import sys
+import traceback
+
+from sqlalchemy import and_, desc, func
+from sqlalchemy.exc import SQLAlchemyError
 
 from Config.trading_config import ConfigManager, TimeFrame, InstrumentConfig
-from Database.db_manager import DatabaseManager
-from Database.models import PriceBar
+from Database.db_session import DatabaseSession
+from Database.models import PriceBar, Instrument, Timeframe as DbTimeframe
 from MT5.mt5_manager import MT5Manager
 from Logger.logger import DBLogger
 from Events.event_bus import EventBus
@@ -28,14 +32,14 @@ class DataFetcher:
             SQL_PASSWORD
         )
 
-        # Create connection string
+        # Create SQLAlchemy connection string
         if USE_WINDOWS_AUTH:
-            conn_string = f"DRIVER={{{SQL_DRIVER}}};SERVER={SQL_SERVER};DATABASE={SQL_DATABASE};Trusted_Connection=yes;"
+            conn_string = f"mssql+pyodbc://{SQL_SERVER}/{SQL_DATABASE}?driver={SQL_DRIVER.replace(' ', '+')}&trusted_connection=yes"
         else:
-            conn_string = f"DRIVER={{{SQL_DRIVER}}};SERVER={SQL_SERVER};DATABASE={SQL_DATABASE};UID={SQL_USERNAME};PWD={SQL_PASSWORD}"
+            conn_string = f"mssql+pyodbc://{SQL_USERNAME}:{SQL_PASSWORD}@{SQL_SERVER}/{SQL_DATABASE}?driver={SQL_DRIVER.replace(' ', '+')}"
 
         self._config = ConfigManager().config
-        self._db_manager = DatabaseManager()
+        self._db_session = DatabaseSession(conn_string)
         self._mt5_manager = MT5Manager()
         self._logger = DBLogger(
             conn_string=conn_string,
@@ -60,8 +64,17 @@ class DataFetcher:
                 status="starting"
             )
 
-            # Initialize database
-            self._db_manager.initialize_database()
+            # Initialize database connection
+            if not self._db_session.initialize():
+                self._logger.log_error(
+                    level="CRITICAL",
+                    message="Failed to initialize database session",
+                    exception_type="DBConnectionError",
+                    function="initialize",
+                    traceback="",
+                    context={}
+                )
+                return False
 
             # Initialize MT5 connection
             if not self._mt5_manager.initialize():
@@ -103,7 +116,7 @@ class DataFetcher:
                 message=f"Failed to initialize data fetcher: {str(e)}",
                 exception_type=type(e).__name__,
                 function="initialize",
-                traceback=str(e),
+                traceback=traceback.format_exc(),
                 context={}
             )
             return False
@@ -111,17 +124,24 @@ class DataFetcher:
     def _build_instrument_timeframe_map(self) -> None:
         """Build mapping of instrument ID and timeframe ID"""
         try:
-            # Get all instruments and timeframes from database
-            db_instruments = self._db_manager.get_all_instruments()
-            db_timeframes = self._db_manager.get_all_timeframes()
+            instrument_map = {}
+            timeframe_map = {}
 
-            # Create instrument map (symbol -> id)
-            instrument_map = {instr.symbol: instr.id for instr in db_instruments}
+            # Get all instruments and timeframes in a single session
+            with self._db_session.session_scope() as session:
+                # Get all instruments
+                db_instruments = session.query(Instrument).all()
+                for instr in db_instruments:
+                    # Store only the ID and symbol to avoid session binding issues
+                    instrument_map[instr.symbol] = instr.id
 
-            # Create timeframe map (name -> id)
-            timeframe_map = {tf.name: tf.id for tf in db_timeframes}
+                # Get all timeframes
+                db_timeframes = session.query(DbTimeframe).all()
+                for tf in db_timeframes:
+                    # Store only the ID and name to avoid session binding issues
+                    timeframe_map[tf.name] = tf.id
 
-            # Build instrument-timeframe map
+            # Now build the mapping using the extracted IDs
             for instrument in self._config.instruments:
                 if instrument.symbol not in instrument_map:
                     self._logger.log_error(
@@ -177,7 +197,7 @@ class DataFetcher:
                 message=f"Failed to build instrument-timeframe map: {str(e)}",
                 exception_type=type(e).__name__,
                 function="_build_instrument_timeframe_map",
-                traceback=str(e),
+                traceback=traceback.format_exc(),
                 context={}
             )
             raise
@@ -224,7 +244,7 @@ class DataFetcher:
                 message=f"Failed to verify symbols: {str(e)}",
                 exception_type=type(e).__name__,
                 function="_verify_symbols",
-                traceback=str(e),
+                traceback=traceback.format_exc(),
                 context={}
             )
             return False
@@ -238,7 +258,12 @@ class DataFetcher:
                 history_size = mapping["history_size"]
 
                 # Check if data exists for this instrument/timeframe
-                latest_timestamp = self._db_manager.get_latest_timestamp(instrument_id, timeframe_id)
+                latest_timestamp = None
+                with self._db_session.session_scope() as session:
+                    latest_timestamp = session.query(func.max(PriceBar.timestamp)) \
+                        .filter(and_(PriceBar.instrument_id == instrument_id,
+                                     PriceBar.timeframe_id == timeframe_id)) \
+                        .scalar()
 
                 if latest_timestamp is None:
                     # No data exists, load initial data
@@ -269,8 +294,10 @@ class DataFetcher:
                     # Convert to price bars
                     bars = self._convert_to_price_bars(mt5_data, instrument_id, timeframe_id)
 
-                    # Insert into database
-                    self._db_manager.insert_price_bars(bars)
+                    # Insert into database using SQLAlchemy
+                    with self._db_session.session_scope() as session:
+                        for bar in bars:
+                            session.add(bar)
 
                     self._logger.log_event(
                         level="INFO",
@@ -288,9 +315,14 @@ class DataFetcher:
                         self._event_bus.publish(event)
                 else:
                     # Verify we have enough historical data
-                    bars = self._db_manager.get_latest_bars(instrument_id, timeframe_id, limit=history_size)
-                    if len(bars) < history_size:
-                        missing_count = history_size - len(bars)
+                    with self._db_session.session_scope() as session:
+                        bars_count = session.query(func.count(PriceBar.id)) \
+                            .filter(and_(PriceBar.instrument_id == instrument_id,
+                                         PriceBar.timeframe_id == timeframe_id)) \
+                            .scalar()
+
+                    if bars_count < history_size:
+                        missing_count = history_size - bars_count
 
                         self._logger.log_event(
                             level="INFO",
@@ -302,20 +334,32 @@ class DataFetcher:
                             details={"symbol": symbol, "timeframe": timeframe.name, "missing": missing_count}
                         )
 
-                        # Calculate from_date for more historical data
-                        oldest_bar = bars[0] if bars else None
+                        # Get oldest bar timestamp
+                        oldest_timestamp = None
+                        with self._db_session.session_scope() as session:
+                            oldest_timestamp = session.query(func.min(PriceBar.timestamp)) \
+                                .filter(and_(PriceBar.instrument_id == instrument_id,
+                                             PriceBar.timeframe_id == timeframe_id)) \
+                                .scalar()
 
-                        if oldest_bar:
+                            # Get all bars to have complete data available
+                            bars = session.query(PriceBar) \
+                                .filter(and_(PriceBar.instrument_id == instrument_id,
+                                             PriceBar.timeframe_id == timeframe_id)) \
+                                .order_by(PriceBar.timestamp.asc()) \
+                                .all()
+
+                        if oldest_timestamp:
                             # Calculate start date based on timeframe
                             minutes = timeframe.minutes
-                            from_date = oldest_bar.timestamp - timedelta(minutes=minutes * missing_count)
+                            from_date = oldest_timestamp - timedelta(minutes=minutes * missing_count)
 
                             # Get more historical data
                             mt5_data = self._mt5_manager.copy_rates_range(
                                 symbol,
                                 timeframe,
                                 from_date,
-                                oldest_bar.timestamp - timedelta(minutes=minutes)
+                                oldest_timestamp - timedelta(minutes=minutes)
                             )
 
                             if mt5_data and len(mt5_data) > 0:
@@ -323,7 +367,9 @@ class DataFetcher:
                                 additional_bars = self._convert_to_price_bars(mt5_data, instrument_id, timeframe_id)
 
                                 # Insert into database
-                                self._db_manager.insert_price_bars(additional_bars)
+                                with self._db_session.session_scope() as session:
+                                    for bar in additional_bars:
+                                        session.add(bar)
 
                                 self._logger.log_event(
                                     level="INFO",
@@ -349,7 +395,7 @@ class DataFetcher:
                 message=f"Failed to load initial data: {str(e)}",
                 exception_type=type(e).__name__,
                 function="_load_initial_data",
-                traceback=str(e),
+                traceback=traceback.format_exc(),
                 context={}
             )
             return False
@@ -427,7 +473,7 @@ class DataFetcher:
                 message=f"Failed to start data fetcher: {str(e)}",
                 exception_type=type(e).__name__,
                 function="start",
-                traceback=str(e),
+                traceback=traceback.format_exc(),
                 context={}
             )
             return False
@@ -458,7 +504,7 @@ class DataFetcher:
                 message=f"Error stopping data fetcher: {str(e)}",
                 exception_type=type(e).__name__,
                 function="stop",
-                traceback=str(e),
+                traceback=traceback.format_exc(),
                 context={}
             )
 
@@ -493,7 +539,7 @@ class DataFetcher:
                     message=f"Error in data fetcher loop: {str(e)}",
                     exception_type=type(e).__name__,
                     function="_fetch_loop",
-                    traceback=str(e),
+                    traceback=traceback.format_exc(),
                     context={}
                 )
 
@@ -509,7 +555,12 @@ class DataFetcher:
                 history_size = mapping["history_size"]
 
                 # Get latest timestamp from database
-                latest_timestamp = self._db_manager.get_latest_timestamp(instrument_id, timeframe_id)
+                latest_timestamp = None
+                with self._db_session.session_scope() as session:
+                    latest_timestamp = session.query(func.max(PriceBar.timestamp)) \
+                        .filter(and_(PriceBar.instrument_id == instrument_id,
+                                     PriceBar.timeframe_id == timeframe_id)) \
+                        .scalar()
 
                 if latest_timestamp is None:
                     # No data yet, skip (should have been loaded in initialize)
@@ -532,11 +583,32 @@ class DataFetcher:
                     bars = self._convert_to_price_bars(mt5_data, instrument_id, timeframe_id)
 
                     if bars:
-                        # Insert into database
-                        self._db_manager.upsert_price_bars(bars)
+                        # Insert into database using SQLAlchemy
+                        with self._db_session.session_scope() as session:
+                            for bar in bars:
+                                # Check if bar already exists
+                                existing = session.query(PriceBar).filter(
+                                    and_(
+                                        PriceBar.instrument_id == bar.instrument_id,
+                                        PriceBar.timeframe_id == bar.timeframe_id,
+                                        PriceBar.timestamp == bar.timestamp
+                                    )
+                                ).first()
+
+                                if existing:
+                                    # Update existing record
+                                    existing.open = bar.open
+                                    existing.high = bar.high
+                                    existing.low = bar.low
+                                    existing.close = bar.close
+                                    existing.volume = bar.volume
+                                    existing.spread = bar.spread
+                                else:
+                                    # Add new record
+                                    session.add(bar)
 
                         # Maintain history limit
-                        self._db_manager.maintain_bar_limit(instrument_id, timeframe_id, history_size)
+                        self._maintain_history_limit(instrument_id, timeframe_id, history_size)
 
                         self._logger.log_event(
                             level="INFO",
@@ -559,9 +631,61 @@ class DataFetcher:
                     message=f"Error fetching data for {symbol}/{timeframe.name}: {str(e)}",
                     exception_type=type(e).__name__,
                     function="_fetch_all_new_data",
-                    traceback=str(e),
-                    context={"symbol": symbol, "timeframe": timeframe.name}
+                    traceback=traceback.format_exc(),
+                    context={"symbol": symbol, "timeframe": str(timeframe.name)}
                 )
+
+    def _maintain_history_limit(self, instrument_id: int, timeframe_id: int, max_bars: int) -> None:
+        """Delete oldest bars to maintain maximum number of bars"""
+        try:
+            with self._db_session.session_scope() as session:
+                # Get current count
+                count = session.query(func.count(PriceBar.id)) \
+                    .filter(and_(PriceBar.instrument_id == instrument_id,
+                                 PriceBar.timeframe_id == timeframe_id)) \
+                    .scalar()
+
+                # If over limit, delete oldest bars
+                if count > max_bars:
+                    delete_count = count - max_bars
+
+                    # Find cutoff timestamp
+                    cutoff_timestamp = session.query(PriceBar.timestamp) \
+                        .filter(and_(PriceBar.instrument_id == instrument_id,
+                                     PriceBar.timeframe_id == timeframe_id)) \
+                        .order_by(PriceBar.timestamp) \
+                        .offset(delete_count - 1) \
+                        .limit(1) \
+                        .scalar()
+
+                    # Delete all bars older than cutoff
+                    deleted = session.query(PriceBar) \
+                        .filter(and_(
+                        PriceBar.instrument_id == instrument_id,
+                        PriceBar.timeframe_id == timeframe_id,
+                        PriceBar.timestamp <= cutoff_timestamp
+                    )) \
+                        .delete(synchronize_session=False)
+
+                    self._logger.log_event(
+                        level="INFO",
+                        message=f"Deleted {deleted} oldest bars to maintain limit",
+                        event_type="DATA_MAINTENANCE",
+                        component="data_fetcher",
+                        action="maintain_bar_limit",
+                        status="success",
+                        details={"instrument_id": instrument_id, "timeframe_id": timeframe_id,
+                                 "max_bars": max_bars, "deleted": deleted}
+                    )
+        except Exception as e:
+            self._logger.log_error(
+                level="ERROR",
+                message=f"Failed to maintain bar limit: {str(e)}",
+                exception_type=type(e).__name__,
+                function="_maintain_history_limit",
+                traceback=traceback.format_exc(),
+                context={"instrument_id": instrument_id, "timeframe_id": timeframe_id, "max_bars": max_bars}
+            )
 
     def get_latest_bars(self, symbol: str, timeframe: TimeFrame, count: int = 100) -> Optional[List[PriceBar]]:
         """Get latest bars for a specific instrument and timeframe"""
@@ -582,8 +706,19 @@ class DataFetcher:
             instrument_id = mapping["instrument_id"]
             timeframe_id = mapping["timeframe_id"]
 
-            # Get bars from database
-            return self._db_manager.get_latest_bars(instrument_id, timeframe_id, count)
+            # Get bars from database using SQLAlchemy
+            with self._db_session.session_scope() as session:
+                bars = session.query(PriceBar) \
+                    .filter(and_(
+                    PriceBar.instrument_id == instrument_id,
+                    PriceBar.timeframe_id == timeframe_id
+                )) \
+                    .order_by(desc(PriceBar.timestamp)) \
+                    .limit(count) \
+                    .all()
+
+                # Convert to list in ascending order (oldest first)
+                return list(reversed(bars))
 
         except Exception as e:
             self._logger.log_error(
@@ -591,7 +726,7 @@ class DataFetcher:
                 message=f"Error getting latest bars for {symbol}/{timeframe.name}: {str(e)}",
                 exception_type=type(e).__name__,
                 function="get_latest_bars",
-                traceback=str(e),
+                traceback=traceback.format_exc(),
                 context={"symbol": symbol, "timeframe": timeframe.name, "count": count}
             )
             return None
@@ -629,8 +764,13 @@ class DataFetcher:
                 timeframe_id = mapping["timeframe_id"]
                 history_size = mapping["history_size"]
 
-                # Get latest timestamp from database
-                latest_timestamp = self._db_manager.get_latest_timestamp(instrument_id, timeframe_id)
+                # Get latest timestamp from database using SQLAlchemy
+                latest_timestamp = None
+                with self._db_session.session_scope() as session:
+                    latest_timestamp = session.query(func.max(PriceBar.timestamp)) \
+                        .filter(and_(PriceBar.instrument_id == instrument_id,
+                                     PriceBar.timeframe_id == timeframe_id)) \
+                        .scalar()
 
                 if latest_timestamp is None:
                     # No data yet, load initial data
@@ -646,11 +786,32 @@ class DataFetcher:
                     bars = self._convert_to_price_bars(mt5_data, instrument_id, timeframe_id)
 
                     if bars:
-                        # Insert into database
-                        self._db_manager.upsert_price_bars(bars)
+                        # Insert into database using SQLAlchemy
+                        with self._db_session.session_scope() as session:
+                            for bar in bars:
+                                # Check if bar already exists
+                                existing = session.query(PriceBar).filter(
+                                    and_(
+                                        PriceBar.instrument_id == bar.instrument_id,
+                                        PriceBar.timeframe_id == bar.timeframe_id,
+                                        PriceBar.timestamp == bar.timestamp
+                                    )
+                                ).first()
+
+                                if existing:
+                                    # Update existing bar
+                                    existing.open = bar.open
+                                    existing.high = bar.high
+                                    existing.low = bar.low
+                                    existing.close = bar.close
+                                    existing.volume = bar.volume
+                                    existing.spread = bar.spread
+                                else:
+                                    # Add new bar
+                                    session.add(bar)
 
                         # Maintain history limit
-                        self._db_manager.maintain_bar_limit(instrument_id, timeframe_id, history_size)
+                        self._maintain_history_limit(instrument_id, timeframe_id, history_size)
 
                         self._logger.log_event(
                             level="INFO",
@@ -696,7 +857,7 @@ class DataFetcher:
                 message=f"Error forcing sync: {str(e)}",
                 exception_type=type(e).__name__,
                 function="force_sync",
-                traceback=str(e),
+                traceback=traceback.format_exc(),
                 context={"symbol": symbol, "timeframe": timeframe.name if timeframe else None}
             )
             return False

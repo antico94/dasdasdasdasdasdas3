@@ -1,55 +1,64 @@
+# Logger/logger.py
 import logging
 import sys
 from typing import Optional, Dict, Any, Set
+import threading
+import json
+import os
+
+from Database.db_session import DatabaseSession
 from .formatters import ColorFormatter
-from .handlers import SQLServerHandler
+from .handlers import SQLAlchemyHandler
 
 
 class DBLogger:
-    """SQL-based logger with optional console output"""
+    """SQL-based logger with optional console output using SQLAlchemy"""
 
     _instance = None
+    _lock = threading.RLock()
 
     def __new__(cls, *args, **kwargs):
-        if cls._instance is None:
-            cls._instance = super(DBLogger, cls).__new__(cls)
-            cls._instance._initialized = False
-        return cls._instance
+        with cls._lock:
+            if cls._instance is None:
+                cls._instance = super(DBLogger, cls).__new__(cls)
+                cls._instance._initialized = False
+            return cls._instance
 
     def __init__(self, conn_string: str, enabled_levels: Set[str] = None, console_output: bool = True,
                  color_scheme: Dict[str, str] = None):
-        if self._initialized:
-            return
+        with self._lock:
+            if self._initialized:
+                return
 
-        self.conn_string = conn_string
-        self.enabled_levels = enabled_levels or {'ERROR', 'CRITICAL'}
-        self.console_output = console_output
-        self.color_scheme = color_scheme
-        self.logger = logging.getLogger('trading_bot')
-        self.logger.setLevel(logging.DEBUG)
-        self.logger.propagate = False
+            self.conn_string = conn_string
+            self.enabled_levels = enabled_levels or {'ERROR', 'CRITICAL'}
+            self.console_output = console_output
+            self.color_scheme = color_scheme
+            self.logger = logging.getLogger('trading_bot')
+            self.logger.setLevel(logging.DEBUG)
+            self.logger.propagate = False
 
-        # Clear existing handlers to avoid duplicates on re-initialization
-        for handler in self.logger.handlers[:]:
-            self.logger.removeHandler(handler)
+            # Clear existing handlers to avoid duplicates on re-initialization
+            for handler in self.logger.handlers[:]:
+                self.logger.removeHandler(handler)
 
-        # SQL Handler (always enabled)
-        self.sql_handler = SQLServerHandler(conn_string)
-        self.sql_handler.setLevel(logging.DEBUG)
-        self.logger.addHandler(self.sql_handler)
+            # SQL Handler (always enabled)
+            self.sql_handler = SQLAlchemyHandler(conn_string, max_records=10000)
+            self.sql_handler.setLevel(logging.DEBUG)
+            self.logger.addHandler(self.sql_handler)
 
-        # Console Handler (conditional)
-        if console_output:
-            self.console_handler = logging.StreamHandler(sys.stdout)
-            self.console_handler.setFormatter(
-                ColorFormatter('%(asctime)s - %(levelname)s - %(message)s', self.color_scheme))
+            # Console Handler (conditional)
+            if console_output:
+                self.console_handler = logging.StreamHandler(sys.stdout)
+                self.console_handler.setFormatter(
+                    ColorFormatter('%(asctime)s - %(levelname)s - %(message)s', self.color_scheme))
 
-            # Set level based on enabled_levels
-            min_level = self._get_min_level()
-            self.console_handler.setLevel(min_level)
-            self.logger.addHandler(self.console_handler)
+                # Set level based on enabled_levels
+                min_level = self._get_min_level()
+                self.console_handler.setLevel(min_level)
+                self.logger.addHandler(self.console_handler)
 
-        self._initialized = True
+            self._initialized = True
 
     def _get_min_level(self) -> int:
         """Get minimum logging level based on enabled_levels"""

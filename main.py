@@ -34,6 +34,12 @@ def configure_container():
         }
     })
 
+    # Initialize database session
+    container.db_session().initialize()
+
+    # Create tables if needed
+    container.db_session().create_all_tables()
+
     return container
 
 
