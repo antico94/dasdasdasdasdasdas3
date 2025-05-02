@@ -1,8 +1,24 @@
 # Strategies/indicator_utils.py
+
 import numpy as np
-from typing import List, Dict, Tuple, Optional, Union
+from typing import List, Dict, Tuple, Optional, Union, Set
 from enum import Enum
-from datetime import datetime, time
+from datetime import datetime, time, timedelta, timezone
+
+
+class TradingSession(Enum):
+    """Trading session definitions with UTC time ranges"""
+    SYDNEY = {"name": "Sydney", "start": time(20, 0), "end": time(5, 0), "next_day_end": True}
+    TOKYO = {"name": "Tokyo", "start": time(0, 0), "end": time(9, 0), "next_day_end": False}
+    LONDON = {"name": "London", "start": time(7, 0), "end": time(16, 0), "next_day_end": False}
+    NEWYORK = {"name": "New York", "start": time(12, 0), "end": time(21, 0), "next_day_end": False}
+    LONDON_NEWYORK_OVERLAP = {"name": "London/NY Overlap", "start": time(12, 0), "end": time(16, 0),
+                              "next_day_end": False}
+    TOKYO_LONDON_OVERLAP = {"name": "Tokyo/London Overlap", "start": time(7, 0), "end": time(9, 0),
+                            "next_day_end": False}
+    ASIAN = {"name": "Asian Session", "start": time(22, 0), "end": time(8, 0), "next_day_end": True}
+    EUROPEAN = {"name": "European Session", "start": time(7, 0), "end": time(16, 0), "next_day_end": False}
+    AMERICAN = {"name": "American Session", "start": time(12, 0), "end": time(21, 0), "next_day_end": False}
 
 
 class MAType(Enum):
@@ -12,6 +28,7 @@ class MAType(Enum):
     WMA = "Weighted Moving Average"
     HULL = "Hull Moving Average"
     TEMA = "Triple Exponential Moving Average"
+    T3 = "T3 Moving Average"
 
 
 class IndicatorUtils:
@@ -84,6 +101,27 @@ class IndicatorUtils:
             ema3 = IndicatorUtils.moving_average(ema2, period, MAType.EMA)
 
             result = 3 * ema1 - 3 * ema2 + ema3
+
+        elif ma_type == MAType.T3:
+            # T3 Moving Average (Tillson T3)
+            # Default volume factor
+            vfactor = 0.7
+
+            # Calculate multiple EMAs
+            e1 = IndicatorUtils.moving_average(prices, period, MAType.EMA)
+            e2 = IndicatorUtils.moving_average(e1, period, MAType.EMA)
+            e3 = IndicatorUtils.moving_average(e2, period, MAType.EMA)
+            e4 = IndicatorUtils.moving_average(e3, period, MAType.EMA)
+            e5 = IndicatorUtils.moving_average(e4, period, MAType.EMA)
+            e6 = IndicatorUtils.moving_average(e5, period, MAType.EMA)
+
+            # Calculate T3 using Tim Tillson's formula
+            c1 = -vfactor ** 3
+            c2 = 3 * vfactor ** 2 + 3 * vfactor ** 3
+            c3 = -6 * vfactor ** 2 - 3 * vfactor - 3 * vfactor ** 3
+            c4 = 1 + 3 * vfactor + vfactor ** 3 + 3 * vfactor ** 2
+
+            result = c1 * e6 + c2 * e5 + c3 * e4 + c4 * e3
 
         return result
 
@@ -198,6 +236,39 @@ class IndicatorUtils:
         # Calculate upper and lower bands
         upper_band = middle_band + (std * deviation)
         lower_band = middle_band - (std * deviation)
+
+        return upper_band, middle_band, lower_band
+
+    @staticmethod
+    def keltner_channel(high: np.ndarray, low: np.ndarray, close: np.ndarray,
+                        period: int = 20, atr_period: int = 10,
+                        atr_multiplier: float = 1.5) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """
+        Calculate Keltner Channels.
+
+        Args:
+            high: Array of high prices
+            low: Array of low prices
+            close: Array of close prices
+            period: Period for the middle line (EMA)
+            atr_period: Period for ATR calculation
+            atr_multiplier: Multiplier for ATR
+
+        Returns:
+            Tuple of (upper_band, middle_band, lower_band)
+        """
+        if len(close) < max(period, atr_period):
+            return np.zeros(len(close)), np.zeros(len(close)), np.zeros(len(close))
+
+        # Calculate middle line (EMA of close)
+        middle_band = IndicatorUtils.moving_average(close, period, MAType.EMA)
+
+        # Calculate ATR
+        atr = IndicatorUtils.atr(high, low, close, atr_period)
+
+        # Calculate bands
+        upper_band = middle_band + (atr * atr_multiplier)
+        lower_band = middle_band - (atr * atr_multiplier)
 
         return upper_band, middle_band, lower_band
 
@@ -494,40 +565,577 @@ class IndicatorUtils:
         return ibs
 
     @staticmethod
-    def is_valid_session(timestamp: datetime, session: str) -> bool:
+    def is_in_session(timestamp: datetime, session: Union[str, TradingSession]) -> bool:
         """
         Check if the given timestamp is within a valid trading session.
 
         Args:
-            timestamp: The datetime to check
-            session: Session name ('london', 'new_york', 'tokyo', etc.)
+            timestamp: The datetime to check (must be in UTC)
+            session: Session name or TradingSession enum
 
         Returns:
             True if within the specified session, False otherwise
         """
-        hour = timestamp.hour
+        # Convert timestamp to UTC if it has timezone info but is not UTC
+        if timestamp.tzinfo is not None and timestamp.tzinfo != timezone.utc:
+            timestamp = timestamp.astimezone(timezone.utc)
 
-        if session == "london":
-            # London session: 7:00-16:00 UTC
-            return 7 <= hour < 16
-        elif session == "new_york":
-            # New York session: 12:00-21:00 UTC
-            return 12 <= hour < 21
-        elif session == "london_new_york":
-            # London + New York overlap: 12:00-16:00 UTC
-            return 12 <= hour < 16
-        elif session == "tokyo":
-            # Tokyo session: 0:00-9:00 UTC
-            return 0 <= hour < 9
-        elif session == "tokyo_ny_overlap":
-            # Tokyo + New York overlap: 8:00-12:00 UTC
-            return 8 <= hour < 12
-        elif session == "asian":
-            # Asian session (broader): 22:00-8:00 UTC
-            return hour >= 22 or hour < 8
+        # If timestamp has no timezone info, assume it's UTC
+        if timestamp.tzinfo is None:
+            timestamp = timestamp.replace(tzinfo=timezone.utc)
 
-        # Default to True if session not recognized
-        return True
+        # Get the hour and minute
+        current_time = timestamp.time()
+
+        # Convert string session name to enum if needed
+        if isinstance(session, str):
+            try:
+                session_enum = TradingSession[session.upper()]
+            except KeyError:
+                raise ValueError(f"Unknown session name: {session}")
+        else:
+            session_enum = session
+
+        session_data = session_enum.value
+        session_start = session_data["start"]
+        session_end = session_data["end"]
+        next_day_end = session_data["next_day_end"]
+
+        # Check if we're in the session
+        if next_day_end:
+            # Session crosses midnight
+            if current_time >= session_start or current_time <= session_end:
+                return True
+        else:
+            # Session within the same day
+            if session_start <= current_time <= session_end:
+                return True
+
+        return False
+
+    @staticmethod
+    def is_valid_session(timestamp: datetime, session_name: str) -> bool:
+        """
+        Check if the given timestamp is within a valid trading session.
+        Backward compatibility method.
+
+        Args:
+            timestamp: The datetime to check
+            session_name: Session name ('london', 'new_york', 'tokyo', etc.)
+
+        Returns:
+            True if within the specified session, False otherwise
+        """
+        # Convert session_name to standard format
+        session_name = session_name.upper().replace('-', '_').replace(' ', '_')
+
+        # Map legacy session names to TradingSession enum
+        session_mapping = {
+            "LONDON": TradingSession.LONDON,
+            "NEW_YORK": TradingSession.NEWYORK,
+            "NEWYORK": TradingSession.NEWYORK,
+            "TOKYO": TradingSession.TOKYO,
+            "LONDON_NEW_YORK": TradingSession.LONDON_NEWYORK_OVERLAP,
+            "LONDON_NEWYORK": TradingSession.LONDON_NEWYORK_OVERLAP,
+            "LONDON_NY": TradingSession.LONDON_NEWYORK_OVERLAP,
+            "LONDONNY": TradingSession.LONDON_NEWYORK_OVERLAP,
+            "TOKYO_LONDON": TradingSession.TOKYO_LONDON_OVERLAP,
+            "TOKYO_NY_OVERLAP": TradingSession.TOKYO_LONDON_OVERLAP,
+            "ASIAN": TradingSession.ASIAN,
+            "EUROPEAN": TradingSession.EUROPEAN,
+            "AMERICAN": TradingSession.AMERICAN
+        }
+
+        try:
+            session = session_mapping.get(session_name)
+            if session is None:
+                # Try direct mapping to enum
+                session = TradingSession[session_name]
+
+            return IndicatorUtils.is_in_session(timestamp, session)
+        except (KeyError, ValueError):
+            # Default to True if session not recognized for backward compatibility
+            return True
+
+    @staticmethod
+    def get_overnight_range(high: np.ndarray, low: np.ndarray, timestamps: List[datetime],
+                            session_start: TradingSession, lookback_days: int = 1) -> Tuple[float, float]:
+        """
+        Calculate the overnight range before a trading session.
+
+        Args:
+            high: Array of high prices
+            low: Array of low prices
+            timestamps: List of timestamp for each bar
+            session_start: Trading session start definition
+            lookback_days: Number of days to look back
+
+        Returns:
+            Tuple of (range_high, range_low)
+        """
+        if len(high) != len(timestamps) or len(low) != len(timestamps):
+            raise ValueError("Length of high, low, and timestamps arrays must match")
+
+        # Convert timestamps to UTC if needed
+        utc_timestamps = []
+        for ts in timestamps:
+            if ts.tzinfo is None:
+                utc_ts = ts.replace(tzinfo=timezone.utc)
+            elif ts.tzinfo != timezone.utc:
+                utc_ts = ts.astimezone(timezone.utc)
+            else:
+                utc_ts = ts
+            utc_timestamps.append(utc_ts)
+
+        # Get the most recent timestamp
+        latest_ts = utc_timestamps[-1]
+
+        # Find the start of the session for the latest day
+        session_data = session_start.value
+        session_start_time = session_data["start"]
+
+        # Create a session start datetime for today
+        session_start_dt = datetime(
+            latest_ts.year,
+            latest_ts.month,
+            latest_ts.day,
+            session_start_time.hour,
+            session_start_time.minute,
+            0,
+            tzinfo=timezone.utc
+        )
+
+        # If the latest timestamp is before today's session start, use today's session
+        # Otherwise, the overnight range is for tomorrow's session, so we need to find bars
+        # between yesterday's session end and today's session start
+        if latest_ts < session_start_dt:
+            # Today's overnight range (before session start)
+            range_start_dt = session_start_dt - timedelta(days=1)
+        else:
+            # Tomorrow's overnight range (after today's session)
+            session_start_dt = session_start_dt + timedelta(days=1)
+            range_start_dt = session_start_dt - timedelta(days=1)
+
+        # Find the end time of the previous session
+        session_end_time = session_data["end"]
+        if session_data["next_day_end"]:
+            # If the session ends on the next day, add a day to the end time
+            range_start_dt = datetime(
+                range_start_dt.year,
+                range_start_dt.month,
+                range_start_dt.day,
+                session_end_time.hour,
+                session_end_time.minute,
+                0,
+                tzinfo=timezone.utc
+            ) + timedelta(days=1)
+        else:
+            range_start_dt = datetime(
+                range_start_dt.year,
+                range_start_dt.month,
+                range_start_dt.day,
+                session_end_time.hour,
+                session_end_time.minute,
+                0,
+                tzinfo=timezone.utc
+            )
+
+        # Find bars in the overnight range
+        overnight_high = float('-inf')
+        overnight_low = float('inf')
+        bars_found = False
+
+        for i in range(len(utc_timestamps)):
+            # Check if the bar is in the overnight range
+            if range_start_dt <= utc_timestamps[i] < session_start_dt:
+                bars_found = True
+                overnight_high = max(overnight_high, high[i])
+                overnight_low = min(overnight_low, low[i])
+
+        # If no bars were found in the overnight range or if the range is invalid
+        if not bars_found or overnight_high == float('-inf') or overnight_low == float('inf'):
+            # Look back additional days if specified
+            if lookback_days > 1:
+                additional_days = 1
+                while additional_days < lookback_days and (
+                        not bars_found or overnight_high == float('-inf') or overnight_low == float('inf')):
+                    # Adjust range to look back another day
+                    range_start_dt = range_start_dt - timedelta(days=1)
+                    session_start_dt = session_start_dt - timedelta(days=1)
+
+                    # Search again with expanded range
+                    for i in range(len(utc_timestamps)):
+                        if range_start_dt <= utc_timestamps[i] < session_start_dt:
+                            bars_found = True
+                            overnight_high = max(overnight_high, high[i])
+                            overnight_low = min(overnight_low, low[i])
+
+                    additional_days += 1
+
+            # If still no valid range found
+            if overnight_high == float('-inf') or overnight_low == float('inf'):
+                # Return the most recent high and low as a fallback
+                if len(high) > 0 and len(low) > 0:
+                    return high[-1], low[-1]
+                else:
+                    raise ValueError("Could not determine overnight range - insufficient data")
+
+        return overnight_high, overnight_low
+
+    @staticmethod
+    def momentum(prices: np.ndarray, period: int = 10) -> np.ndarray:
+        """
+        Calculate the momentum indicator.
+
+        Args:
+            prices: Array of price values
+            period: Momentum period
+
+        Returns:
+            Array with momentum values
+        """
+        if len(prices) <= period:
+            return np.zeros(len(prices))
+
+        momentum = np.zeros(len(prices))
+
+        for i in range(period, len(prices)):
+            momentum[i] = prices[i] - prices[i - period]
+
+        return momentum
+
+    @staticmethod
+    def price_crosses_above(array1: np.ndarray, array2: np.ndarray) -> np.ndarray:
+        """
+        Detect when array1 crosses above array2.
+
+        Args:
+            array1: First array of values
+            array2: Second array of values
+
+        Returns:
+            Array of booleans, True when crossover occurs
+        """
+        if len(array1) != len(array2):
+            raise ValueError("Arrays must be of equal length")
+
+        crosses = np.zeros(len(array1), dtype=bool)
+
+        # Cannot cross with only one value
+        if len(array1) <= 1:
+            return crosses
+
+        for i in range(1, len(array1)):
+            if array1[i - 1] <= array2[i - 1] and array1[i] > array2[i]:
+                crosses[i] = True
+
+        return crosses
+
+    @staticmethod
+    def price_crosses_below(array1: np.ndarray, array2: np.ndarray) -> np.ndarray:
+        """
+        Detect when array1 crosses below array2.
+
+        Args:
+            array1: First array of values
+            array2: Second array of values
+
+        Returns:
+            Array of booleans, True when crossunder occurs
+        """
+        if len(array1) != len(array2):
+            raise ValueError("Arrays must be of equal length")
+
+        crosses = np.zeros(len(array1), dtype=bool)
+
+        # Cannot cross with only one value
+        if len(array1) <= 1:
+            return crosses
+
+        for i in range(1, len(array1)):
+            if array1[i - 1] >= array2[i - 1] and array1[i] < array2[i]:
+                crosses[i] = True
+
+        return crosses
+
+    @staticmethod
+    def is_bullish_engulfing(open_prices: np.ndarray, close: np.ndarray) -> np.ndarray:
+        """
+        Detect bullish engulfing candlestick patterns.
+
+        Args:
+            open_prices: Array of open prices
+            close: Array of close prices
+
+        Returns:
+            Array of booleans, True for bullish engulfing pattern
+        """
+        if len(open_prices) != len(close):
+            raise ValueError("Arrays must be of equal length")
+
+        pattern = np.zeros(len(close), dtype=bool)
+
+        # Need at least two candles for engulfing pattern
+        if len(close) <= 1:
+            return pattern
+
+        for i in range(1, len(close)):
+            # Previous candle is bearish (close < open)
+            # Current candle is bullish (close > open)
+            # Current candle engulfs previous (open < prev close AND close > prev open)
+            if (close[i - 1] < open_prices[i - 1] and  # Previous candle is bearish
+                    close[i] > open_prices[i] and  # Current candle is bullish
+                    open_prices[i] < close[i - 1] and  # Current open is lower than previous close
+                    close[i] > open_prices[i - 1]):  # Current close is higher than previous open
+                pattern[i] = True
+
+        return pattern
+
+    @staticmethod
+    def is_bearish_engulfing(open_prices: np.ndarray, close: np.ndarray) -> np.ndarray:
+        """
+        Detect bearish engulfing candlestick patterns.
+
+        Args:
+            open_prices: Array of open prices
+            close: Array of close prices
+
+        Returns:
+            Array of booleans, True for bearish engulfing pattern
+        """
+        if len(open_prices) != len(close):
+            raise ValueError("Arrays must be of equal length")
+
+        pattern = np.zeros(len(close), dtype=bool)
+
+        # Need at least two candles for engulfing pattern
+        if len(close) <= 1:
+            return pattern
+
+        for i in range(1, len(close)):
+            # Previous candle is bullish (close > open)
+            # Current candle is bearish (close < open)
+            # Current candle engulfs previous (open > prev close AND close < prev open)
+            if (close[i - 1] > open_prices[i - 1] and  # Previous candle is bullish
+                    close[i] < open_prices[i] and  # Current candle is bearish
+                    open_prices[i] > close[i - 1] and  # Current open is higher than previous close
+                    close[i] < open_prices[i - 1]):  # Current close is lower than previous open
+                pattern[i] = True
+
+        return pattern
+
+    @staticmethod
+    def average_volume(volume: np.ndarray, period: int = 20) -> np.ndarray:
+        """
+        Calculate the average volume over a period.
+
+        Args:
+            volume: Array of volume values
+            period: Lookback period for average
+
+        Returns:
+            Array with average volume values
+        """
+        return IndicatorUtils.moving_average(volume, period, MAType.SMA)
+
+    @staticmethod
+    def volume_spike(volume: np.ndarray, period: int = 20, threshold: float = 1.5) -> np.ndarray:
+        """
+        Detect volume spikes where current volume exceeds average by threshold factor.
+
+        Args:
+            volume: Array of volume values
+            period: Lookback period for average volume
+            threshold: Multiplier for average to consider as spike
+
+        Returns:
+            Array of booleans, True when volume spike occurs
+        """
+        if len(volume) <= period:
+            return np.zeros(len(volume), dtype=bool)
+
+        avg_volume = IndicatorUtils.average_volume(volume, period)
+
+        # Check for volume spikes
+        spikes = np.zeros(len(volume), dtype=bool)
+
+        for i in range(period, len(volume)):
+            if volume[i] > avg_volume[i] * threshold:
+                spikes[i] = True
+
+        return spikes
+
+    @staticmethod
+    def round_numbers(min_price: float, max_price: float,
+                      pip_value: float = 0.0001, levels: int = 5) -> List[float]:
+        """
+        Generate significant round number price levels.
+
+        Args:
+            min_price: Minimum price for range
+            max_price: Maximum price for range
+            pip_value: Value of one pip
+            levels: Number of significant levels to identify
+
+        Returns:
+            List of price levels
+        """
+        if min_price >= max_price:
+            raise ValueError("min_price must be less than max_price")
+
+        if pip_value <= 0:
+            raise ValueError("pip_value must be positive")
+
+        # Determine decimal places based on pip value
+        if pip_value >= 0.01:  # JPY pairs
+            decimal_places = 2
+            round_factor = 1.0  # Look for whole numbers
+        elif pip_value >= 0.0001:  # Most FX pairs
+            decimal_places = 4
+            round_factor = 0.01  # Look for 100 pip intervals (0.01)
+        else:
+            decimal_places = 5
+            round_factor = 0.001  # Look for 100 pip intervals (0.001)
+
+        # Find potential round numbers
+        potential_levels = []
+
+        # Start at a round number below min_price
+        start_level = np.floor(min_price / round_factor) * round_factor
+
+        # Generate potential levels
+        current_level = start_level
+        while current_level <= max_price:
+            if current_level >= min_price:
+                potential_levels.append(current_level)
+            current_level = np.round(current_level + round_factor, decimal_places)
+
+        # If we have more potential levels than requested, select most significant ones
+        if len(potential_levels) > levels:
+            # For simplicity, evenly distribute the levels
+            step = len(potential_levels) // levels
+            selected_levels = potential_levels[::step][:levels]
+            return selected_levels
+        else:
+            return potential_levels
+
+    @staticmethod
+    def is_price_near_level(price: float, level: float, pips_distance: int = 10,
+                            pip_value: float = 0.0001) -> bool:
+        """
+        Check if price is within N pips of a given level.
+
+        Args:
+            price: Current price
+            level: Price level to check against
+            pips_distance: Number of pips to consider as "near"
+            pip_value: Value of one pip
+
+        Returns:
+            True if price is within pips_distance of level
+        """
+        distance_in_pips = abs(price - level) / pip_value
+        return distance_in_pips <= pips_distance
+
+    @staticmethod
+    def calculate_fibonacci_levels(high: float, low: float, is_uptrend: bool = True) -> Dict[str, float]:
+        """
+        Calculate Fibonacci retracement levels.
+
+        Args:
+            high: High price point
+            low: Low price point
+            is_uptrend: True for uptrend (retracements from low to high), False for downtrend
+
+        Returns:
+            Dictionary with retracement levels
+        """
+        if high <= low:
+            raise ValueError("high must be greater than low")
+
+        range_size = high - low
+
+        # Standard Fibonacci retracement levels
+        levels = {
+            "0.0": low if is_uptrend else high,
+            "0.236": low + 0.236 * range_size if is_uptrend else high - 0.236 * range_size,
+            "0.382": low + 0.382 * range_size if is_uptrend else high - 0.382 * range_size,
+            "0.5": low + 0.5 * range_size if is_uptrend else high - 0.5 * range_size,
+            "0.618": low + 0.618 * range_size if is_uptrend else high - 0.618 * range_size,
+            "0.786": low + 0.786 * range_size if is_uptrend else high - 0.786 * range_size,
+            "1.0": high if is_uptrend else low
+        }
+
+        # Add extension levels
+        levels.update({
+            "1.272": high + 0.272 * range_size if is_uptrend else low - 0.272 * range_size,
+            "1.618": high + 0.618 * range_size if is_uptrend else low - 0.618 * range_size,
+            "2.0": high + range_size if is_uptrend else low - range_size,
+            "2.618": high + 1.618 * range_size if is_uptrend else low - 1.618 * range_size
+        })
+
+        return levels
+
+    @staticmethod
+    def bollinger_band_width(prices: np.ndarray, period: int = 20,
+                             deviation: float = 2.0) -> np.ndarray:
+        """
+        Calculate Bollinger Band width as an indicator of volatility.
+
+        Args:
+            prices: Array of price values
+            period: Period for moving average
+            deviation: Number of standard deviations
+
+        Returns:
+            Array with Bollinger Band width values
+        """
+        upper, middle, lower = IndicatorUtils.bollinger_bands(prices, period, deviation)
+
+        # Calculate width as percentage of middle band
+        width = np.zeros(len(prices))
+
+        for i in range(period - 1, len(prices)):
+            if middle[i] > 0:  # Avoid division by zero
+                width[i] = (upper[i] - lower[i]) / middle[i]
+
+        return width
+
+    @staticmethod
+    def detect_bollinger_squeeze(prices: np.ndarray, period: int = 20,
+                                 deviation: float = 2.0, width_period: int = 50,
+                                 squeeze_percentage: float = 0.5) -> np.ndarray:
+        """
+        Detect when Bollinger Bands are in a squeeze (narrowing) compared to recent history.
+
+        Args:
+            prices: Array of price values
+            period: Period for Bollinger Bands
+            deviation: Number of standard deviations
+            width_period: Period to compare current width against
+            squeeze_percentage: Percentage of normal width to consider as squeeze
+
+        Returns:
+            Array of booleans, True when bands are in a squeeze
+        """
+        if len(prices) < period + width_period:
+            return np.zeros(len(prices), dtype=bool)
+
+        # Calculate Bollinger Band width
+        bb_width = IndicatorUtils.bollinger_band_width(prices, period, deviation)
+
+        # Detect squeeze
+        squeeze = np.zeros(len(prices), dtype=bool)
+
+        for i in range(period + width_period - 1, len(prices)):
+            # Calculate the average width over the width_period
+            avg_width = np.mean(bb_width[i - width_period + 1:i + 1])
+
+            # Check if current width is below squeeze threshold
+            if bb_width[i] < avg_width * squeeze_percentage:
+                squeeze[i] = True
+
+        return squeeze
 
     @staticmethod
     def calculate_pivot_points(high: float, low: float, close: float,
@@ -630,3 +1238,115 @@ class IndicatorUtils:
             return 0
 
         return reward / risk
+
+    @staticmethod
+    def detect_ma_cross(prices: np.ndarray, short_period: int, long_period: int,
+                        ma_type: MAType = MAType.EMA) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Detect moving average crossovers.
+
+        Args:
+            prices: Array of price values
+            short_period: Period for short-term MA
+            long_period: Period for long-term MA
+            ma_type: Type of moving average
+
+        Returns:
+            Tuple of (crosses_above, crosses_below)
+        """
+        # Calculate moving averages
+        short_ma = IndicatorUtils.moving_average(prices, short_period, ma_type)
+        long_ma = IndicatorUtils.moving_average(prices, long_period, ma_type)
+
+        # Detect crossovers
+        crosses_above = IndicatorUtils.price_crosses_above(short_ma, long_ma)
+        crosses_below = IndicatorUtils.price_crosses_below(short_ma, long_ma)
+
+        return crosses_above, crosses_below
+
+    @staticmethod
+    def detect_triple_ma_setup(prices: np.ndarray, short_period: int,
+                               medium_period: int, long_period: int,
+                               ma_type: MAType = MAType.EMA) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Detect triple moving average setups (short > medium > long for bullish, reverse for bearish).
+
+        Args:
+            prices: Array of price values
+            short_period: Period for short-term MA
+            medium_period: Period for medium-term MA
+            long_period: Period for long-term MA
+            ma_type: Type of moving average
+
+        Returns:
+            Tuple of (bullish_setups, bearish_setups)
+        """
+        # Calculate moving averages
+        short_ma = IndicatorUtils.moving_average(prices, short_period, ma_type)
+        medium_ma = IndicatorUtils.moving_average(prices, medium_period, ma_type)
+        long_ma = IndicatorUtils.moving_average(prices, long_period, ma_type)
+
+        # Detect setups
+        bullish_setups = np.zeros(len(prices), dtype=bool)
+        bearish_setups = np.zeros(len(prices), dtype=bool)
+
+        min_period = max(short_period, medium_period, long_period)
+
+        for i in range(min_period, len(prices)):
+            # Bullish: short > medium > long
+            if short_ma[i] > medium_ma[i] and medium_ma[i] > long_ma[i]:
+                bullish_setups[i] = True
+
+            # Bearish: short < medium < long
+            if short_ma[i] < medium_ma[i] and medium_ma[i] < long_ma[i]:
+                bearish_setups[i] = True
+
+        return bullish_setups, bearish_setups
+
+    @staticmethod
+    def detect_ichimoku_signals(ichimoku_data: Dict[str, np.ndarray],
+                                close: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Detect Ichimoku bullish and bearish signals.
+
+        Args:
+            ichimoku_data: Dictionary with Ichimoku components from ichimoku() function
+            close: Array of close prices
+
+        Returns:
+            Tuple of (bullish_signals, bearish_signals)
+        """
+        if len(close) < 1:
+            return np.zeros(len(close), dtype=bool), np.zeros(len(close), dtype=bool)
+
+        tenkan = ichimoku_data['tenkan_sen']
+        kijun = ichimoku_data['kijun_sen']
+        senkou_a = ichimoku_data['senkou_span_a']
+        senkou_b = ichimoku_data['senkou_span_b']
+
+        # Detect TK cross
+        tk_bull_cross = IndicatorUtils.price_crosses_above(tenkan, kijun)
+        tk_bear_cross = IndicatorUtils.price_crosses_below(tenkan, kijun)
+
+        # Check price position relative to the cloud
+        bullish_signals = np.zeros(len(close), dtype=bool)
+        bearish_signals = np.zeros(len(close), dtype=bool)
+
+        for i in range(26, len(close)):  # Start after cloud displacement
+            # Define the cloud top and bottom
+            cloud_top = max(senkou_a[i], senkou_b[i])
+            cloud_bottom = min(senkou_a[i], senkou_b[i])
+
+            # Bullish signal: TK Cross + Price above cloud + Cloud is green (A > B)
+            if (tk_bull_cross[i] and
+                    close[i] > cloud_top and
+                    senkou_a[i] > senkou_b[i]):
+                bullish_signals[i] = True
+
+            # Bearish signal: TK Cross + Price below cloud + Cloud is red (B > A)
+            if (tk_bear_cross[i] and
+                    close[i] < cloud_bottom and
+                    senkou_b[i] > senkou_a[i]):
+                bearish_signals[i] = True
+
+        return bullish_signals, bearish_signals
