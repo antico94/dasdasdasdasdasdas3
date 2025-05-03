@@ -1,13 +1,13 @@
 # Strategies/base_strategy.py
 from abc import ABC, abstractmethod
-from typing import Dict, Any, List, Optional, Set, Tuple
-from datetime import datetime
-import numpy as np
-import logging
+from datetime import datetime, timezone
+from typing import Dict, Any, List, Optional, Set
 
-from Events.events import SignalEvent
-from Database.models import PriceBar
+import numpy as np
+
 from Config.trading_config import TimeFrame
+from Database.models import PriceBar
+from Events.events import SignalEvent
 from Logger.logger import DBLogger
 
 
@@ -72,13 +72,13 @@ class BaseStrategy(ABC):
         """Enable or disable the strategy"""
         self.enabled = enabled
 
+    # Strategies/base_strategy.py - modified on_bar method
+
     def on_bar(self, timeframe: TimeFrame, bars: List[PriceBar]) -> Optional[SignalEvent]:
         """
-        Process new bars for a specific timeframe.
-
+        Process new bars for a specific timeframe, ensuring only completed bars are used.
         This method is called by the trading system when new bars are available.
-        It checks if a bar has completed since the last check and triggers
-        signal calculation if appropriate.
+        It strictly enforces using only completed bars (not the current forming bar).
 
         Args:
             timeframe: The timeframe of the bars
@@ -87,46 +87,93 @@ class BaseStrategy(ABC):
         Returns:
             SignalEvent if a signal is generated, None otherwise
         """
-        if not self.is_enabled() or len(bars) < 2:
+        if not self.is_enabled():
             return None
 
-        # Check if we have a newly completed candle
-        # bars[-1] is the current forming candle, bars[-2] is the latest completed candle
-        completed_candle = bars[-2]
+        # Validate we have enough bars (at least one completed bar and one forming bar)
+        if len(bars) < 2:
+            self.log_strategy_event(
+                level="WARNING",
+                message=f"Insufficient bars for {self.symbol} on {timeframe.name}. Need at least 2, got {len(bars)}",
+                action="on_bar",
+                status="validation_failed",
+                details={"timeframe": timeframe.name, "bars_count": len(bars)}
+            )
+            return None
 
-        # If we've already processed this candle, skip
+        # Separate the completed bars from the current forming bar
+        completed_bars = bars[:-1]  # All bars except the last one
+        # Note: We're not using the forming bar in calculations, but we keep track of it
+        # for potential logging or debugging purposes
+        forming_bar = bars[-1]  # The last bar is currently forming
+
+        # Get the latest completed candle
+        latest_completed_candle = completed_bars[-1]
+
+        # Check if we've already processed this candle
         if (self.last_processed_timestamps[timeframe] is not None and
-                completed_candle.timestamp <= self.last_processed_timestamps[timeframe]):
+                latest_completed_candle.timestamp <= self.last_processed_timestamps[timeframe]):
+            # We've already processed this candle, no need to do it again
             return None
 
-        # Log the new completed candle
+        # Format timestamp safely for logging
+        timestamp_str = str(latest_completed_candle.timestamp)
+
+        # Log the new completed candle we're about to process
         self.log_strategy_event(
             level="DEBUG",
-            message=f"New completed {timeframe.name} candle detected for {self.symbol}",
+            message=f"Processing new completed {timeframe.name} candle for {self.symbol}",
             action="on_bar",
             status="processing",
             details={
                 "timeframe": timeframe.name,
-                "timestamp": completed_candle.timestamp.isoformat(),
-                "open": completed_candle.open,
-                "high": completed_candle.high,
-                "low": completed_candle.low,
-                "close": completed_candle.close,
-                "volume": completed_candle.volume
+                "timestamp": timestamp_str,
+                "open": latest_completed_candle.open,
+                "high": latest_completed_candle.high,
+                "low": latest_completed_candle.low,
+                "close": latest_completed_candle.close,
+                "volume": latest_completed_candle.volume,
+                "is_completed": True,
+                "forming_bar_time": str(forming_bar.timestamp)  # Using the forming bar for context
             }
         )
 
         # Update the timestamp of the last processed candle
-        self.last_processed_timestamps[timeframe] = completed_candle.timestamp
+        self.last_processed_timestamps[timeframe] = latest_completed_candle.timestamp
 
-        # Store the completed bars (excluding the current forming bar)
-        self.completed_bars[timeframe] = bars[:-1]
+        # Store the completed bars for strategy access (excluding the forming bar)
+        self.completed_bars[timeframe] = completed_bars
 
-        # Calculate and cache indicators for this timeframe
+        # Calculate and cache indicators for this timeframe (using only completed bars)
         self.update_indicators(timeframe)
 
-        # Calculate signal based on completed candles
-        return self.calculate_signals(timeframe)
+        # Check if signal throttling is active for this timeframe/bar
+        if not self.check_signal_throttling(timeframe):
+            # Safely format the last signal time for logging
+            last_signal_time_str = "None"
+            if timeframe in self.last_signal_time and self.last_signal_time[timeframe] is not None:
+                last_signal_time_str = str(self.last_signal_time[timeframe])
+
+            self.log_strategy_event(
+                level="INFO",
+                message=f"Signal throttling active for {self.symbol} on {timeframe.name}",
+                action="on_bar",
+                status="throttled",
+                details={
+                    "timeframe": timeframe.name,
+                    "last_signal_time": last_signal_time_str
+                }
+            )
+            return None
+
+        # Calculate signal based on completed candles only
+        signal = self.calculate_signals(timeframe)
+
+        # If a signal was generated, mark this timestamp to prevent multiple signals
+        if signal:
+            self.mark_signal_generated(timeframe)
+
+        return signal
 
     def update_indicators(self, timeframe: TimeFrame):
         """
@@ -178,22 +225,6 @@ class BaseStrategy(ABC):
                 details=details or {}
             )
 
-    def get_completed_bars(self, timeframe: TimeFrame, lookback: int = None) -> List[PriceBar]:
-        """
-        Get the completed bars for a specific timeframe.
-
-        Args:
-            timeframe: The timeframe to get bars for
-            lookback: Number of bars to return (None for all available)
-
-        Returns:
-            List of completed price bars
-        """
-        bars = self.completed_bars.get(timeframe, [])
-        if lookback is not None and lookback > 0 and len(bars) > lookback:
-            return bars[-lookback:]
-        return bars
-
     def get_indicator(self, timeframe: TimeFrame, indicator_name: str) -> Any:
         """
         Get a cached indicator value for a specific timeframe.
@@ -235,8 +266,7 @@ class BaseStrategy(ABC):
     def check_signal_throttling(self, timeframe: TimeFrame) -> bool:
         """
         Check if signal generation should be throttled.
-
-        Ensures only one signal per candle is generated.
+        Ensures only one signal per completed candle is generated.
 
         Args:
             timeframe: The timeframe to check
@@ -247,20 +277,59 @@ class BaseStrategy(ABC):
         if timeframe not in self.last_signal_time:
             return True
 
-        if (self.last_signal_time[timeframe] is None or
-                self.last_processed_timestamps[timeframe] != self.last_signal_time[timeframe]):
+        # Get the timestamp of the last processed candle
+        last_processed = self.last_processed_timestamps.get(timeframe)
+        if last_processed is None:
             return True
 
-        return False
+        # Get the timestamp of the last signal for this timeframe
+        last_signal = self.last_signal_time.get(timeframe)
+        if last_signal is None:
+            return True
+
+        # If the last signal was from this same candle, throttle it
+        if last_signal == last_processed:
+            return False
+
+        # Signal is allowed if it's for a new candle
+        return True
 
     def mark_signal_generated(self, timeframe: TimeFrame):
         """
-        Mark that a signal has been generated for the current candle.
+        Mark that a signal has been generated for the current completed candle.
+        This prevents multiple signals from the same candle.
 
         Args:
             timeframe: The timeframe the signal was generated for
         """
-        self.last_signal_time[timeframe] = self.last_processed_timestamps[timeframe]
+        # First check if the timeframe exists in our timestamps dictionary
+        if timeframe not in self.last_processed_timestamps:
+            # Nothing to mark, just return
+            return
+
+        # Get the timestamp, being careful with types
+        last_processed = self.last_processed_timestamps[timeframe]
+
+        # Only proceed if we have a valid timestamp
+        if last_processed is None:
+            return
+
+        # Store the timestamp
+        self.last_signal_time[timeframe] = last_processed
+
+        # Format for logging only if it's a datetime object
+        if isinstance(last_processed, datetime):
+            timestamp_str = last_processed.isoformat()
+        else:
+            timestamp_str = str(last_processed)
+
+        self.log_strategy_event(
+            level="DEBUG",
+            message=f"Signal marked for {self.symbol} on {timeframe.name} at {timestamp_str}",
+            action="mark_signal_generated",
+            status="success",
+            details={"timeframe": timeframe.name, "timestamp": timestamp_str}
+        )
 
     def get_bars_as_arrays(self, timeframe: TimeFrame, lookback: int = None) -> Dict[str, np.ndarray]:
         """
@@ -294,11 +363,11 @@ class BaseStrategy(ABC):
 
     def validate_bars(self, timeframe: TimeFrame, min_bars: int) -> bool:
         """
-        Validate that we have enough bars for analysis.
+        Validate that we have enough completed bars for analysis.
 
         Args:
             timeframe: The timeframe to validate
-            min_bars: Minimum number of bars required
+            min_bars: Minimum number of completed bars required
 
         Returns:
             True if validation passes, False otherwise
@@ -308,13 +377,66 @@ class BaseStrategy(ABC):
         if len(bars) < min_bars:
             self.log_strategy_event(
                 level="WARNING",
-                message=f"Not enough bars for {self.symbol} on {timeframe.name}. Need {min_bars}, got {len(bars)}",
+                message=f"Not enough completed bars for {self.symbol} on {timeframe.name}. Need {min_bars}, got {len(bars)}",
                 action="validate_bars",
-                status="failed"
+                status="failed",
+                details={"timeframe": timeframe.name, "required": min_bars, "available": len(bars)}
+            )
+            return False
+
+        # Also validate no bars from the future are included
+        current_time = datetime.now(timezone.utc).replace(tzinfo=None)
+        future_bars = [bar for bar in bars if bar.timestamp > current_time]
+
+        if future_bars:
+            self.log_strategy_event(
+                level="ERROR",
+                message=f"Found {len(future_bars)} bars from the future for {self.symbol} on {timeframe.name}",
+                action="validate_bars",
+                status="future_data_detected",
+                details={
+                    "timeframe": timeframe.name,
+                    "future_bars_count": len(future_bars),
+                    "first_future_timestamp": future_bars[0].timestamp.isoformat() if future_bars else None
+                }
             )
             return False
 
         return True
+
+    def get_completed_bars(self, timeframe: TimeFrame, lookback: int = None) -> List[PriceBar]:
+        """
+        Get the completed bars for a specific timeframe with validation.
+
+        This method ensures only completed bars are used for strategy decisions.
+
+        Args:
+            timeframe: The timeframe to get bars for
+            lookback: Number of bars to return (None for all available)
+
+        Returns:
+            List of completed price bars
+        """
+        if timeframe not in self.completed_bars:
+            self.log_strategy_event(
+                level="WARNING",
+                message=f"No completed bars available for {self.symbol} on {timeframe.name}",
+                action="get_completed_bars",
+                status="no_data",
+                details={"timeframe": timeframe.name}
+            )
+            return []
+
+        bars = self.completed_bars.get(timeframe, [])
+
+        if not bars:
+            return []
+
+        # Apply lookback filter if specified
+        if lookback is not None and 0 < lookback < len(bars):
+            return bars[-lookback:]
+
+        return bars
 
     def create_signal(self, timeframe: TimeFrame, direction: str, reason: str,
                       strength: float = 1.0, entry_price: Optional[float] = None,
