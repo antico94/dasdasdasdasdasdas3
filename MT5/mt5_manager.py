@@ -636,4 +636,340 @@ class MT5Manager:
             )
             return None
 
+    def place_order(self, symbol: str, order_type: int, volume: float, price: float,
+                    sl: float = 0, tp: float = 0, comment: str = "") -> Dict[str, Any]:
+        """
+        Place a trading order.
 
+        Args:
+            symbol: The trading symbol
+            order_type: Order type (0=BUY, 1=SELL)
+            volume: Order volume in lots
+            price: Order price (0 for market orders)
+            sl: Stop loss price
+            tp: Take profit price
+            comment: Order comment
+
+        Returns:
+            Dict containing order result
+        """
+        if not self.ensure_connection():
+            return {'result': False, 'error': 'Not connected to MT5'}
+
+        try:
+            # Import inside method to avoid circular imports
+            import MetaTrader5 as mt5
+
+            # Validate inputs
+            if volume <= 0:
+                return {'result': False, 'error': 'Invalid volume'}
+
+            # Set up order request
+            request = {
+                "action": mt5.TRADE_ACTION_DEAL,
+                "symbol": symbol,
+                "volume": float(volume),
+                "type": mt5.ORDER_TYPE_BUY if order_type == 0 else mt5.ORDER_TYPE_SELL,
+                "price": 0.0,  # Market price
+                "sl": float(sl) if sl else 0.0,
+                "tp": float(tp) if tp else 0.0,
+                "deviation": 10,  # Allowed price deviation
+                "magic": 123456,  # Expert Advisor ID
+                "comment": comment,
+                "type_time": mt5.ORDER_TIME_GTC,
+                "type_filling": mt5.ORDER_FILLING_FOK
+            }
+
+            # Send order to MT5
+            result = mt5.order_send(request)
+
+            if result is None:
+                error = mt5.last_error()
+                return {
+                    'result': False,
+                    'error': f"Error code: {error[0]}, Error description: {error[1]}"
+                }
+
+            # Check result
+            if result.retcode == mt5.TRADE_RETCODE_DONE:
+                # Success
+                return {
+                    'result': True,
+                    'order': result.order,
+                    'price': result.price,
+                    'volume': result.volume
+                }
+            else:
+                # Failed
+                return {
+                    'result': False,
+                    'error': f"Order failed, retcode={result.retcode}, comment={result.comment}"
+                }
+
+        except Exception as e:
+            self._logger.log_error(
+                level="ERROR",
+                message=f"Error placing order: {str(e)}",
+                exception_type=type(e).__name__,
+                function="place_order",
+                traceback=str(e),
+                context={"symbol": symbol, "type": order_type, "volume": volume}
+            )
+            return {'result': False, 'error': str(e)}
+
+    def close_position(self, ticket: int) -> Dict[str, Any]:
+        """
+        Close an open position.
+
+        Args:
+            ticket: Position ticket number
+
+        Returns:
+            Dict containing close result
+        """
+        if not self.ensure_connection():
+            return {'result': False, 'error': 'Not connected to MT5'}
+
+        try:
+            # Import inside method to avoid circular imports
+            import MetaTrader5 as mt5
+
+            # Get position info
+            position = mt5.positions_get(ticket=ticket)
+
+            if not position:
+                return {'result': False, 'error': 'Position not found'}
+
+            position = position[0]
+
+            # Set up close request
+            request = {
+                "action": mt5.TRADE_ACTION_DEAL,
+                "symbol": position.symbol,
+                "volume": position.volume,
+                "type": mt5.ORDER_TYPE_SELL if position.type == mt5.POSITION_TYPE_BUY else mt5.ORDER_TYPE_BUY,
+                "position": ticket,
+                "price": 0.0,  # Market price
+                "deviation": 10,
+                "magic": 123456,
+                "comment": f"Close #{ticket}",
+                "type_time": mt5.ORDER_TIME_GTC,
+                "type_filling": mt5.ORDER_FILLING_FOK
+            }
+
+            # Send order to MT5
+            result = mt5.order_send(request)
+
+            if result is None:
+                error = mt5.last_error()
+                return {
+                    'result': False,
+                    'error': f"Error code: {error[0]}, Error description: {error[1]}"
+                }
+
+            # Check result
+            if result.retcode == mt5.TRADE_RETCODE_DONE:
+                # Success
+                return {
+                    'result': True,
+                    'order': result.order,
+                    'close_price': result.price,
+                    'close_volume': result.volume,
+                    'profit': position.profit
+                }
+            else:
+                # Failed
+                return {
+                    'result': False,
+                    'error': f"Close failed, retcode={result.retcode}, comment={result.comment}"
+                }
+
+        except Exception as e:
+            self._logger.log_error(
+                level="ERROR",
+                message=f"Error closing position: {str(e)}",
+                exception_type=type(e).__name__,
+                function="close_position",
+                traceback=str(e),
+                context={"ticket": ticket}
+            )
+            return {'result': False, 'error': str(e)}
+
+    def modify_position(self, ticket: int, sl: float = None, tp: float = None) -> Dict[str, Any]:
+        """
+        Modify an open position.
+
+        Args:
+            ticket: Position ticket number
+            sl: New stop loss price (None to keep existing)
+            tp: New take profit price (None to keep existing)
+
+        Returns:
+            Dict containing modification result
+        """
+        if not self.ensure_connection():
+            return {'result': False, 'error': 'Not connected to MT5'}
+
+        try:
+            # Import inside method to avoid circular imports
+            import MetaTrader5 as mt5
+
+            # Get position info
+            position = mt5.positions_get(ticket=ticket)
+
+            if not position:
+                return {'result': False, 'error': 'Position not found'}
+
+            position = position[0]
+
+            # Use existing values if not specified
+            if sl is None:
+                sl = position.sl
+
+            if tp is None:
+                tp = position.tp
+
+            # Set up modification request
+            request = {
+                "action": mt5.TRADE_ACTION_SLTP,
+                "symbol": position.symbol,
+                "position": ticket,
+                "sl": float(sl) if sl else 0.0,
+                "tp": float(tp) if tp else 0.0
+            }
+
+            # Send request to MT5
+            result = mt5.order_send(request)
+
+            if result is None:
+                error = mt5.last_error()
+                return {
+                    'result': False,
+                    'error': f"Error code: {error[0]}, Error description: {error[1]}"
+                }
+
+            # Check result
+            if result.retcode == mt5.TRADE_RETCODE_DONE:
+                # Success
+                return {
+                    'result': True,
+                    'new_sl': sl,
+                    'new_tp': tp
+                }
+            else:
+                # Failed
+                return {
+                    'result': False,
+                    'error': f"Modification failed, retcode={result.retcode}, comment={result.comment}"
+                }
+
+        except Exception as e:
+            self._logger.log_error(
+                level="ERROR",
+                message=f"Error modifying position: {str(e)}",
+                exception_type=type(e).__name__,
+                function="modify_position",
+                traceback=str(e),
+                context={"ticket": ticket, "sl": sl, "tp": tp}
+            )
+            return {'result': False, 'error': str(e)}
+
+    def get_positions(self, symbol: str = None) -> List[Dict[str, Any]]:
+        """
+        Get open positions.
+
+        Args:
+            symbol: Filter by symbol (None for all positions)
+
+        Returns:
+            List of position dictionaries
+        """
+        if not self.ensure_connection():
+            return []
+
+        try:
+            # Import inside method to avoid circular imports
+            import MetaTrader5 as mt5
+
+            # Get positions
+            if symbol:
+                positions = mt5.positions_get(symbol=symbol)
+            else:
+                positions = mt5.positions_get()
+
+            if positions is None or len(positions) == 0:
+                return []
+
+            # Convert to dictionaries
+            result = []
+            for position in positions:
+                position_dict = {
+                    'ticket': position.ticket,
+                    'symbol': position.symbol,
+                    'type': position.type,  # 0=BUY, 1=SELL
+                    'volume': position.volume,
+                    'price_open': position.price_open,
+                    'price_current': position.price_current,
+                    'sl': position.sl,
+                    'tp': position.tp,
+                    'profit': position.profit,
+                    'comment': position.comment,
+                    'time': position.time
+                }
+                result.append(position_dict)
+
+            return result
+
+        except Exception as e:
+            self._logger.log_error(
+                level="ERROR",
+                message=f"Error getting positions: {str(e)}",
+                exception_type=type(e).__name__,
+                function="get_positions",
+                traceback=str(e),
+                context={"symbol": symbol}
+            )
+            return []
+
+    def get_account_info(self) -> Dict[str, Any]:
+        """
+        Get account information.
+
+        Returns:
+            Dict containing account info
+        """
+        if not self.ensure_connection():
+            return {}
+
+        try:
+            # Import inside method to avoid circular imports
+            import MetaTrader5 as mt5
+
+            # Get account info
+            account_info = mt5.account_info()
+
+            if account_info is None:
+                return {}
+
+            # Convert to dictionary
+            return {
+                'login': account_info.login,
+                'balance': account_info.balance,
+                'equity': account_info.equity,
+                'margin': account_info.margin,
+                'free_margin': account_info.margin_free,
+                'margin_level': account_info.margin_level,
+                'currency': account_info.currency,
+                'leverage': account_info.leverage
+            }
+
+        except Exception as e:
+            self._logger.log_error(
+                level="ERROR",
+                message=f"Error getting account info: {str(e)}",
+                exception_type=type(e).__name__,
+                function="get_account_info",
+                traceback=str(e),
+                context={}
+            )
+            return {}
