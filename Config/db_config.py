@@ -9,11 +9,11 @@ class DatabaseConfig:
     server: str
     database: str
     driver: str = "ODBC Driver 17 for SQL Server"
-    trusted_connection: bool = True  # Windows authentication
+    trusted_connection: bool = False  # Windows authentication
 
     # Optional parameters for SQL authentication (not used with Windows auth)
-    username: Optional[str] = None
-    password: Optional[str] = None
+    username: Optional[str] = "app_user"
+    password: Optional[str] = "password01!"
 
     @property
     def connection_string(self) -> str:

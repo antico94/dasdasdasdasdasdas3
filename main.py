@@ -1,7 +1,10 @@
 # Initialize ConfigManager first
 import os
 from Config.trading_config import ConfigManager
-
+import signal
+import sys
+import threading
+import time
 # Create and load configuration
 config_manager = ConfigManager()
 config_path = "Config/trading_config.json"
@@ -16,11 +19,8 @@ else:
     config_manager.save_default_config(config_path)
     config_manager.load_from_file(config_path)
     print(f"Default configuration created and loaded at {config_path}")
-import os
-import signal
-import sys
-import threading
-import time
+
+
 
 from dependency_injector.wiring import inject, Provide
 from container import Container
