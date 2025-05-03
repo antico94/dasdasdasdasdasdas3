@@ -271,7 +271,7 @@ class StrategyManager:
             instrument_id = self.instrument_ids.get(symbol)
             bars = self.db_manager.get_latest_bars(instrument_id, timeframe_id)
 
-            if not bars or len(bars) < 2:
+            if not bars or len(bars) < 2:  # Need at least 1 completed + 1 forming
                 return
 
             # Process each strategy
