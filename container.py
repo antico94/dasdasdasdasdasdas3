@@ -8,6 +8,7 @@ from Data.data_fetcher import DataFetcher
 from Events.event_bus import EventBus
 from MT5.mt5_manager import MT5Manager
 from Data.scheduled_updates import TimeframeUpdateScheduler
+from Strategies.timeframe_manager import TimeframeManager
 
 
 class Container(containers.DeclarativeContainer):
@@ -77,4 +78,10 @@ class Container(containers.DeclarativeContainer):
         data_fetcher=data_fetcher,
         mt5_manager=mt5_manager,
         logger=db_logger
+    )
+
+    timeframe_manager = providers.Singleton(
+        TimeframeManager,
+        logger=db_logger,
+        event_bus=event_bus
     )

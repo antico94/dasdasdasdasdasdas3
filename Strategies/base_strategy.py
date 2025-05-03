@@ -517,3 +517,45 @@ class BaseStrategy(ABC):
         )
 
         return signal
+    def update_timeframe_manager(self, timeframe: TimeFrame, timestamp: datetime):
+        """
+        Update the timeframe manager with the latest processed timestamp.
+
+        This method should be called after processing a bar to mark the timeframe
+        as updated in the TimeframeManager.
+
+        Args:
+            timeframe: The timeframe that was processed
+            timestamp: The timestamp of the processed bar
+        """
+        try:
+            # Import here to avoid circular imports
+            from Strategies.timeframe_manager import TimeframeManager
+
+            # Get the singleton instance
+            timeframe_manager = TimeframeManager()
+
+            # Mark the timeframe as updated
+            timeframe_manager.mark_timeframe_updated(self.name, timeframe, timestamp)
+
+            self.log_strategy_event(
+                level="DEBUG",
+                message=f"Updated TimeframeManager for {self.symbol}/{timeframe.name}",
+                action="update_timeframe_manager",
+                status="success",
+                details={
+                    "timeframe": timeframe.name,
+                    "timestamp": str(timestamp)
+                }
+            )
+        except Exception as e:
+            self.log_strategy_event(
+                level="ERROR",
+                message=f"Error updating TimeframeManager: {str(e)}",
+                action="update_timeframe_manager",
+                status="failed",
+                details={
+                    "timeframe": timeframe.name,
+                    "error": str(e)
+                }
+            )

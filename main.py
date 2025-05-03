@@ -5,6 +5,9 @@ import signal
 import sys
 import threading
 import time
+
+from Strategies.timeframe_manager import TimeframeManager
+
 # Create and load configuration
 config_manager = ConfigManager()
 config_path = "Config/trading_config.json"
@@ -41,8 +44,10 @@ class TradingBot:
             logger: DBLogger = Provide[Container.db_logger],
             data_fetcher: DataFetcher = Provide[Container.data_fetcher],
             event_bus: EventBus = Provide[Container.event_bus],
-            mt5_manager: MT5Manager = Provide[Container.mt5_manager]
+            mt5_manager: MT5Manager = Provide[Container.mt5_manager],
+            timeframe_manager: TimeframeManager = Provide[Container.timeframe_manager]
     ):
+        self._timeframe_manager = timeframe_manager
         self._logger = logger
         self._data_fetcher = data_fetcher
         self._event_bus = event_bus
@@ -77,6 +82,19 @@ class TradingBot:
                     context={}
                 )
                 return False
+
+            # Initialize TimeframeManager (it's already a singleton, so this just ensures initialization)
+            from Strategies.timeframe_manager import TimeframeManager
+            self._timeframe_manager = TimeframeManager(logger=self._logger, event_bus=self._event_bus)
+
+            self._logger.log_event(
+                level="INFO",
+                message="TimeframeManager initialized",
+                event_type="SYSTEM_INIT",
+                component="trading_bot",
+                action="initialize",
+                status="progress"
+            )
 
             # Register signal handlers for graceful shutdown
             signal.signal(signal.SIGINT, self._signal_handler)

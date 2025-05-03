@@ -1,6 +1,6 @@
 # Strategies/strategy_manager.py
 import threading
-from typing import List, Set, Type, Optional
+from typing import List, Set, Type, Optional, Dict, Any
 
 from Config.trading_config import TimeFrame
 from Database.db_manager import DatabaseManager
@@ -8,6 +8,7 @@ from Events.event_bus import EventBus
 from Events.events import NewBarEvent
 from Logger.logger import DBLogger
 from Strategies.base_strategy import BaseStrategy
+from Strategies.timeframe_manager import TimeframeManager
 
 
 class StrategyManager:
@@ -36,6 +37,9 @@ class StrategyManager:
 
         # Strategy instances by symbol and name
         self.strategies = {}  # {symbol: {strategy_name: strategy_instance}}
+
+        # Initialize the timeframe manager
+        self.timeframe_manager = TimeframeManager(logger=logger, event_bus=event_bus)
 
         # Timeframe mappings
         self.timeframe_ids = {}  # {TimeFrame: id}
@@ -158,6 +162,20 @@ class StrategyManager:
 
             self.strategies[symbol][name] = strategy
 
+            # Register timeframe dependencies with the TimeframeManager
+            # Each timeframe depends on all other timeframes in the strategy
+            for primary_tf in timeframes:
+                # A timeframe depends on all other timeframes
+                # We'll exclude the primary timeframe from its own dependencies
+                dependent_tfs = set(tf for tf in timeframes if tf != primary_tf)
+
+                # Register with TimeframeManager
+                self.timeframe_manager.register_strategy_timeframes(
+                    strategy_name=name,
+                    primary_timeframe=primary_tf,
+                    dependent_timeframes=dependent_tfs
+                )
+
             self.logger.log_event(
                 level="INFO",
                 message=f"Registered strategy {name} for {symbol}",
@@ -187,6 +205,10 @@ class StrategyManager:
         """
         with self.lock:
             if symbol in self.strategies and name in self.strategies[symbol]:
+                # Clean up TimeframeManager entries
+                self.timeframe_manager.clear_strategy(name)
+
+                # Remove the strategy from our registry
                 del self.strategies[symbol][name]
 
                 if not self.strategies[symbol]:
@@ -281,6 +303,23 @@ class StrategyManager:
                     continue
 
                 try:
+                    # Check if timeframes are ready with the TimeframeManager
+                    if not self.timeframe_manager.check_timeframe_ready(strategy_name, timeframe):
+                        self.logger.log_event(
+                            level="DEBUG",
+                            message=f"Timeframe {timeframe.name} not ready for strategy {strategy_name}",
+                            event_type="STRATEGY_EXECUTION",
+                            component="strategy_manager",
+                            action="_on_new_bar",
+                            status="not_ready",
+                            details={
+                                "strategy_name": strategy_name,
+                                "symbol": symbol,
+                                "timeframe": timeframe.name
+                            }
+                        )
+                        continue
+
                     # Call the strategy's on_bar method
                     signal = strategy.on_bar(timeframe, bars)
 
@@ -331,3 +370,30 @@ class StrategyManager:
                     "timeframe_id": getattr(event, "timeframe_id", None)
                 }
             )
+
+    def get_timeframe_update_status(self, strategy_name: str) -> Dict[str, Any]:
+        """
+        Get the timeframe update status for a strategy.
+
+        Args:
+            strategy_name: Name of the strategy
+
+        Returns:
+            Dictionary with timeframe update status
+        """
+        try:
+            if not strategy_name:
+                raise ValueError("Strategy name cannot be empty")
+
+            # Get the status from the TimeframeManager
+            return self.timeframe_manager.get_update_status(strategy_name)
+        except Exception as e:
+            self.logger.log_error(
+                level="ERROR",
+                message=f"Error getting timeframe update status: {str(e)}",
+                exception_type=type(e).__name__,
+                function="get_timeframe_update_status",
+                traceback=str(e),
+                context={"strategy_name": strategy_name}
+            )
+            return {}
