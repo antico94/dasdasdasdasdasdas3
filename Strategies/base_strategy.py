@@ -384,8 +384,22 @@ class BaseStrategy(ABC):
             )
             return False
 
-        # Also validate no bars from the future are included
-        current_time = datetime.now(timezone.utc).replace(tzinfo=None)
+        # Get server time from MT5 manager (should be injected or accessible)
+        # This is safer than using local machine time
+        if hasattr(self, 'mt5_manager') and self.mt5_manager:
+            current_time = self.mt5_manager.get_server_time()
+        else:
+            # Fallback to UTC time if MT5 manager not available
+            current_time = datetime.now(timezone.utc).replace(tzinfo=None)
+            self.log_strategy_event(
+                level="WARNING",
+                message="MT5 server time not available, using local UTC time for validation",
+                action="validate_bars",
+                status="fallback_time",
+                details={"timeframe": timeframe.name}
+            )
+
+        # Validate no bars from the future are included
         future_bars = [bar for bar in bars if bar.timestamp > current_time]
 
         if future_bars:

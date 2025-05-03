@@ -110,16 +110,20 @@ class TestBaseStrategy(unittest.TestCase):
 
     def test_validate_bars(self):
         """Test bars validation"""
+        # Mock MT5 manager or server time if applicable
+
         # Not enough bars
         self.strategy.completed_bars[self.timeframe] = self.create_bars(2)
         self.assertFalse(self.strategy.validate_bars(self.timeframe, 3))
 
-        # Enough bars
-        self.strategy.completed_bars[self.timeframe] = self.create_bars(5)
+        # Enough bars - create bars with timestamps well in the past
+        one_day_ago = datetime.now() - timedelta(days=1)
+        self.strategy.completed_bars[self.timeframe] = self.create_bars(5, start_time=one_day_ago)
         self.assertTrue(self.strategy.validate_bars(self.timeframe, 3))
 
-        # Future bars
-        future_bars = self.create_bars(3, start_time=datetime.now() + timedelta(minutes=10))
+        # Future bars - create bars with timestamps clearly in the future
+        future_time = datetime.now() + timedelta(days=1)
+        future_bars = self.create_bars(3, start_time=future_time)
         self.strategy.completed_bars[self.timeframe] = future_bars
         self.assertFalse(self.strategy.validate_bars(self.timeframe, 3))
 
