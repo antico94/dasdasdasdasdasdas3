@@ -1297,7 +1297,7 @@ class OrderManager:
                 }
 
         except Exception as e:
-            self._logger.log_error(
+            self.logger.log_error(
                 level="ERROR",
                 message=f"Error placing order: {str(e)}",
                 exception_type=type(e).__name__,
@@ -1375,7 +1375,7 @@ class OrderManager:
                 }
 
         except Exception as e:
-            self._logger.log_error(
+            self.logger.log_error(
                 level="ERROR",
                 message=f"Error closing position: {str(e)}",
                 exception_type=type(e).__name__,
@@ -1454,7 +1454,7 @@ class OrderManager:
                 }
 
         except Exception as e:
-            self._logger.log_error(
+            self.logger.log_error(
                 level="ERROR",
                 message=f"Error modifying position: {str(e)}",
                 exception_type=type(e).__name__,
@@ -1511,7 +1511,7 @@ class OrderManager:
             return result
 
         except Exception as e:
-            self._logger.log_error(
+            self.logger.log_error(
                 level="ERROR",
                 message=f"Error getting positions: {str(e)}",
                 exception_type=type(e).__name__,
