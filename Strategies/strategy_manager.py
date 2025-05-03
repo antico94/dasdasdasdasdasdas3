@@ -1,12 +1,12 @@
 # Strategies/strategy_manager.py
-from typing import Dict, List, Set, Type, Optional
 import threading
+from typing import List, Set, Type, Optional
 
-from Events.events import NewBarEvent, SignalEvent
-from Events.event_bus import EventBus
-from Database.db_manager import DatabaseManager
-from Logger.logger import DBLogger
 from Config.trading_config import TimeFrame
+from Database.db_manager import DatabaseManager
+from Events.event_bus import EventBus
+from Events.events import NewBarEvent
+from Logger.logger import DBLogger
 from Strategies.base_strategy import BaseStrategy
 
 

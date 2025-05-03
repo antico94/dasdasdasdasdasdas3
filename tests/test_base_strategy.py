@@ -3,7 +3,7 @@
 import unittest
 from datetime import datetime, timedelta
 from typing import Optional
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 from Config.trading_config import TimeFrame
 from Database.models import PriceBar

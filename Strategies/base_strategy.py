@@ -19,7 +19,7 @@ class BaseStrategy(ABC):
     and provides proper multi-timeframe synchronization.
     """
 
-    def __init__(self, name: str, symbol: str, timeframes: Set[TimeFrame], logger: DBLogger = None):
+    def __init__(self, name: str, symbol: str, timeframes: Set[TimeFrame], logger: DBLogger = None, **kwargs):
         """
         Initialize the strategy with required parameters.
 

@@ -6,7 +6,7 @@ import traceback
 
 from sqlalchemy import and_, desc, func
 
-from Config.trading_config import ConfigManager, TimeFrame, InstrumentConfig
+from Config.trading_config import ConfigManager, TimeFrame
 from Database.db_session import DatabaseSession
 from Database.models import PriceBar, Instrument, Timeframe as DbTimeframe
 from MT5.mt5_manager import MT5Manager
@@ -409,8 +409,7 @@ class DataFetcher:
             )
             return False
 
-    def _convert_to_price_bars(self, mt5_data: List[Dict[str, Any]], instrument_id: int, timeframe_id: int) -> List[
-        PriceBar]:
+    def _convert_to_price_bars(self, mt5_data: List[Dict[str, Any]], instrument_id: int, timeframe_id: int) -> List[PriceBar]:
         """Convert MT5 data to price bars using UTC timestamps"""
         bars = []
         for rate in mt5_data:
