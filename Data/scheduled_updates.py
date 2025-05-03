@@ -358,36 +358,11 @@ class TimeframeUpdateScheduler:
                     )
                     return
 
-                symbol_info = self._mt5_manager.get_symbol_info(symbol)
-                if not symbol_info:
-                    self._logger.log_event(
-                        level="WARNING",
-                        message=f"Cannot get symbol info for {symbol}",
-                        event_type="MARKET_STATE",
-                        component="timeframe_scheduler",
-                        action="_update_market_states",
-                        status="symbol_error",
-                        details={"symbol": symbol}
-                    )
-                    continue
+                # Use the improved market open check from DataFetcher (add this method to DataFetcher)
+                market_open = self._data_fetcher.is_market_open(symbol)
 
-                # Determine market state
-                if hasattr(symbol_info, 'trade_mode'):
-                    trade_mode = symbol_info.trade_mode
-
-                    # Always treat trade_mode 4 as OPEN since we can place orders manually
-                    if trade_mode == 0:  # No trading
-                        state = MarketStateType.CLOSED
-                    elif trade_mode in [1, 2, 3, 4]:  # All trading modes including "close only"
-                        state = MarketStateType.OPEN
-                    else:
-                        state = MarketStateType.CLOSED
-                else:
-                    # No trade_mode attribute, use session info
-                    if datetime.now().weekday() >= 5:  # Weekend
-                        state = MarketStateType.CLOSED
-                    else:
-                        state = MarketStateType.OPEN
+                # Set state based on improved check
+                state = MarketStateType.OPEN if market_open else MarketStateType.CLOSED
 
                 # Update cache and ONLY log if state changed
                 previous_state = self._market_state_cache.get(symbol)

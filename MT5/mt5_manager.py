@@ -564,7 +564,17 @@ class MT5Manager:
             return None
 
         try:
-            # Get symbol info for any available symbol to extract server time
+            # Try to use configured symbols first, as they are guaranteed to be available
+            for instrument in self._config.instruments:
+                symbol = instrument.symbol
+                last_tick = mt5.symbol_info_tick(symbol)
+
+                if last_tick:
+                    # Get time from the tick (server time)
+                    server_time = datetime.fromtimestamp(last_tick.time, tz=timezone.utc).replace(tzinfo=None)
+                    return server_time
+
+            # If all configured symbols fail, try to get any available symbol
             symbols = mt5.symbols_get()
             if not symbols:
                 self._logger.log_error(
@@ -577,25 +587,24 @@ class MT5Manager:
                 )
                 return None
 
-            # Get the first symbol's latest tick to get server time
-            symbol = symbols[0].name
-            last_tick = mt5.symbol_info_tick(symbol)
+            # Try each symbol until we get a tick
+            for symbol_info in symbols:
+                symbol = symbol_info.name
+                last_tick = mt5.symbol_info_tick(symbol)
 
-            if not last_tick:
-                self._logger.log_error(
-                    level="ERROR",
-                    message=f"Failed to get latest tick for {symbol}",
-                    exception_type="MT5DataError",
-                    function="get_server_time",
-                    traceback="",
-                    context={"symbol": symbol}
-                )
-                return None
+                if last_tick:
+                    server_time = datetime.fromtimestamp(last_tick.time, tz=timezone.utc).replace(tzinfo=None)
+                    return server_time
 
-            # Get time from the tick (server time)
-            server_time = datetime.fromtimestamp(last_tick.time, tz=timezone.utc).replace(tzinfo=None)
-
-            return server_time
+            self._logger.log_error(
+                level="ERROR",
+                message="Failed to get tick from any symbol",
+                exception_type="MT5DataError",
+                function="get_server_time",
+                traceback="",
+                context={}
+            )
+            return None
 
         except Exception as e:
             self._logger.log_error(
@@ -626,3 +635,5 @@ class MT5Manager:
                 context={"symbol": symbol}
             )
             return None
+
+
