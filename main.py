@@ -1,58 +1,67 @@
-# Initialize ConfigManager first
+# main.py
+"""
+Trading Bot Main Module
+This is the entry point for the trading bot application
+"""
+
 import os
-from Config.trading_config import ConfigManager
 import signal
 import sys
-import threading
 import time
+import threading
+import traceback
+from datetime import datetime
 
-from Strategies.timeframe_manager import TimeframeManager
-
-# Create and load configuration
-config_manager = ConfigManager()
-config_path = "Config/trading_config.json"
-
-if os.path.exists(config_path):
-    print(f"Loading configuration from {config_path}")
-    config_manager.load_from_file(config_path)
-    print("Configuration loaded successfully")
-else:
-    print(f"Config file not found: {config_path}")
-    print("Creating default configuration...")
-    config_manager.save_default_config(config_path)
-    config_manager.load_from_file(config_path)
-    print(f"Default configuration created and loaded at {config_path}")
-
-
-
-from dependency_injector.wiring import inject, Provide
-from container import Container
-
-from Data.data_fetcher import DataFetcher
-from Events.event_bus import EventBus
+from Config.trading_config import ConfigManager
 from Logger.logger import DBLogger
-from MT5.mt5_manager import MT5Manager
-from Data.scheduled_updates import TimeframeUpdateScheduler
+from startup import TradingBotStartup
+from system_monitor import SystemMonitor
 
 
 class TradingBot:
     """Main trading bot application"""
 
-    @inject
-    def __init__(
-            self,
-            logger: DBLogger = Provide[Container.db_logger],
-            data_fetcher: DataFetcher = Provide[Container.data_fetcher],
-            event_bus: EventBus = Provide[Container.event_bus],
-            mt5_manager: MT5Manager = Provide[Container.mt5_manager],
-            timeframe_manager: TimeframeManager = Provide[Container.timeframe_manager]
-    ):
-        self._timeframe_manager = timeframe_manager
-        self._logger = logger
-        self._data_fetcher = data_fetcher
-        self._event_bus = event_bus
-        self._mt5_manager = mt5_manager
-        self._update_scheduler = TimeframeUpdateScheduler(self._data_fetcher, self._mt5_manager, self._logger)
+    def __init__(self):
+        # Load configuration first
+        self.config_manager = ConfigManager()
+        config_path = "Config/trading_config.json"
+
+        if os.path.exists(config_path):
+            print(f"Loading configuration from {config_path}")
+            self.config_manager.load_from_file(config_path)
+            print("Configuration loaded successfully")
+        else:
+            print(f"Config file not found: {config_path}")
+            print("Creating default configuration...")
+            self.config_manager.save_default_config(config_path)
+            self.config_manager.load_from_file(config_path)
+            print(f"Default configuration created and loaded at {config_path}")
+
+        # Create connection string from credentials
+        from Config.credentials import (
+            SQL_SERVER,
+            SQL_DATABASE,
+            SQL_DRIVER,
+            USE_WINDOWS_AUTH,
+            SQL_USERNAME,
+            SQL_PASSWORD
+        )
+
+        # Create SQLAlchemy connection string
+        if USE_WINDOWS_AUTH:
+            conn_string = f"mssql+pyodbc://{SQL_SERVER}/{SQL_DATABASE}?driver={SQL_DRIVER.replace(' ', '+')}&trusted_connection=yes"
+        else:
+            conn_string = f"mssql+pyodbc://{SQL_USERNAME}:{SQL_PASSWORD}@{SQL_SERVER}/{SQL_DATABASE}?driver={SQL_DRIVER.replace(' ', '+')}"
+
+        # Initialize logger
+        self._logger = DBLogger(
+            conn_string=conn_string,
+            enabled_levels={'INFO', 'WARNING', 'ERROR', 'CRITICAL'},
+            console_output=True
+        )
+
+        self._startup = TradingBotStartup(self._logger)
+        self._system_monitor = None
         self._running = False
         self._stop_event = threading.Event()
         self._shutdown_complete_event = threading.Event()
@@ -71,11 +80,14 @@ class TradingBot:
                 status="starting"
             )
 
-            # Initialize data fetcher
-            if not self._data_fetcher.initialize():
+            # Pass the config manager to startup
+            self._startup.config_manager = self.config_manager
+
+            # Initialize all components
+            if not self._startup.initialize_components():
                 self._logger.log_error(
                     level="CRITICAL",
-                    message="Failed to initialize data fetcher",
+                    message="Failed to initialize components",
                     exception_type="InitializationError",
                     function="initialize",
                     traceback="",
@@ -83,18 +95,14 @@ class TradingBot:
                 )
                 return False
 
-            # Initialize TimeframeManager (it's already a singleton, so this just ensures initialization)
-            from Strategies.timeframe_manager import TimeframeManager
-            self._timeframe_manager = TimeframeManager(logger=self._logger, event_bus=self._event_bus)
-
-            self._logger.log_event(
-                level="INFO",
-                message="TimeframeManager initialized",
-                event_type="SYSTEM_INIT",
-                component="trading_bot",
-                action="initialize",
-                status="progress"
-            )
+            # Get required references for monitoring
+            components = self._startup.components
+            if 'mt5_manager' in components and 'order_manager' in components:
+                self._system_monitor = SystemMonitor(
+                    logger=self._logger,
+                    mt5_manager=components['mt5_manager'],
+                    order_manager=components['order_manager']
+                )
 
             # Register signal handlers for graceful shutdown
             signal.signal(signal.SIGINT, self._signal_handler)
@@ -117,7 +125,7 @@ class TradingBot:
                 message=f"Failed to initialize trading bot: {str(e)}",
                 exception_type=type(e).__name__,
                 function="initialize",
-                traceback=str(e),
+                traceback=traceback.format_exc(),
                 context={}
             )
             return False
@@ -140,11 +148,11 @@ class TradingBot:
             self._shutdown_complete_event.clear()
             self._shutdown_in_progress = False
 
-            # Start data fetcher
-            if not self._data_fetcher.start():
+            # Start components
+            if not self._startup.start_components():
                 self._logger.log_error(
                     level="CRITICAL",
-                    message="Failed to start data fetcher",
+                    message="Failed to start components",
                     exception_type="StartupError",
                     function="start",
                     traceback="",
@@ -152,23 +160,27 @@ class TradingBot:
                 )
                 return False
 
-            # Start the update scheduler
-            if not self._update_scheduler.start():
+            # Verify system readiness
+            if not self._startup.verify_system_readiness():
                 self._logger.log_error(
                     level="CRITICAL",
-                    message="Failed to start update scheduler",
+                    message="System readiness verification failed",
                     exception_type="StartupError",
                     function="start",
                     traceback="",
                     context={}
                 )
                 return False
+
+            # Start system monitor
+            if self._system_monitor:
+                self._system_monitor.start()
 
             self._running = True
 
             self._logger.log_event(
                 level="INFO",
-                message="Trading bot started",
+                message="Trading bot started successfully",
                 event_type="SYSTEM_START",
                 component="trading_bot",
                 action="start",
@@ -184,7 +196,7 @@ class TradingBot:
                 message=f"Failed to start trading bot: {str(e)}",
                 exception_type=type(e).__name__,
                 function="start",
-                traceback=str(e),
+                traceback=traceback.format_exc(),
                 context={}
             )
             return False
@@ -211,53 +223,60 @@ class TradingBot:
             # Signal all threads to stop
             self._stop_event.set()
 
-            # Stop update scheduler
-            self._logger.log_event(
-                level="INFO",
-                message="Stopping update scheduler",
-                event_type="SYSTEM_STOP",
-                component="trading_bot",
-                action="stop_component",
-                status="progress",
-                details={"component": "update_scheduler"}
-            )
-            self._update_scheduler.stop()
+            # Stop system monitor first
+            if self._system_monitor:
+                self._logger.log_event(
+                    level="INFO",
+                    message="Stopping system monitor",
+                    event_type="SYSTEM_STOP",
+                    component="trading_bot",
+                    action="stop_component",
+                    status="progress",
+                    details={"component": "system_monitor"}
+                )
+                self._system_monitor.stop()
+
+            # Get components for shutdown
+            components = self._startup.components
 
             # Stop data fetcher
-            self._logger.log_event(
-                level="INFO",
-                message="Stopping data fetcher",
-                event_type="SYSTEM_STOP",
-                component="trading_bot",
-                action="stop_component",
-                status="progress",
-                details={"component": "data_fetcher"}
-            )
-            self._data_fetcher.stop()
+            if 'data_fetcher' in components:
+                self._logger.log_event(
+                    level="INFO",
+                    message="Stopping data fetcher",
+                    event_type="SYSTEM_STOP",
+                    component="trading_bot",
+                    action="stop_component",
+                    status="progress",
+                    details={"component": "data_fetcher"}
+                )
+                components['data_fetcher'].stop()
 
             # Stop event bus
-            self._logger.log_event(
-                level="INFO",
-                message="Stopping event bus",
-                event_type="SYSTEM_STOP",
-                component="trading_bot",
-                action="stop_component",
-                status="progress",
-                details={"component": "event_bus"}
-            )
-            self._event_bus.stop()
+            if 'event_bus' in components:
+                self._logger.log_event(
+                    level="INFO",
+                    message="Stopping event bus",
+                    event_type="SYSTEM_STOP",
+                    component="trading_bot",
+                    action="stop_component",
+                    status="progress",
+                    details={"component": "event_bus"}
+                )
+                components['event_bus'].stop()
 
             # Shut down MT5 connection
-            self._logger.log_event(
-                level="INFO",
-                message="Shutting down MT5 connection",
-                event_type="SYSTEM_STOP",
-                component="trading_bot",
-                action="stop_component",
-                status="progress",
-                details={"component": "mt5_manager"}
-            )
-            self._mt5_manager.shutdown()
+            if 'mt5_manager' in components:
+                self._logger.log_event(
+                    level="INFO",
+                    message="Shutting down MT5 connection",
+                    event_type="SYSTEM_STOP",
+                    component="trading_bot",
+                    action="stop_component",
+                    status="progress",
+                    details={"component": "mt5_manager"}
+                )
+                components['mt5_manager'].shutdown()
 
             self._running = False
             self._shutdown_in_progress = False
@@ -279,7 +298,7 @@ class TradingBot:
                 message=f"Error during trading bot shutdown: {str(e)}",
                 exception_type=type(e).__name__,
                 function="stop",
-                traceback=str(e),
+                traceback=traceback.format_exc(),
                 context={}
             )
             # Even if there's an error, signal that shutdown is complete
@@ -297,6 +316,7 @@ class TradingBot:
             # Print banner
             print("\n" + "=" * 80)
             print(" Trading Bot Running - Press Ctrl+C to stop gracefully".center(80))
+            print(" Started at: {}".format(datetime.now().strftime("%Y-%m-%d %H:%M:%S")).center(80))
             print("=" * 80 + "\n")
 
             # Keep the main thread alive
@@ -367,45 +387,338 @@ class TradingBot:
                 os._exit(1)
 
 
-def init_container():
-    # Create and configure the container
-    container = Container()
+# System monitor class
+class SystemMonitor:
+    """
+    Monitors system resources and trading bot components.
 
-    # Load configuration
-    container.config.from_dict({
-        "db": {
-            "server": "DESKTOP-B1AT4R0\\SQLEXPRESS",
-            "database": "GeneralTradingBot",
-            "driver": "ODBC Driver 17 for SQL Server",
-            "trusted_connection": True
-        },
-        "logging": {
-            "enabled_levels": ['INFO', 'WARNING', 'ERROR', 'CRITICAL'],
-            "console_output": True,
-            "max_records": 10000,
-            "color_scheme": {
-                'DEBUG': '\033[37m',  # White
-                'INFO': '\033[36m',  # Cyan
-                'WARNING': '\033[33m',  # Yellow
-                'ERROR': '\033[31m',  # Red
-                'CRITICAL': '\033[41m',  # Red background
-            }
-        }
-    })
+    This class provides:
+    1. System resource monitoring (CPU, memory)
+    2. MT5 connection health checks
+    3. Trading activity monitoring
+    4. Periodic garbage collection
+    """
 
-    # Initialize the components
-    container.init_resources()
+    def __init__(self, logger: DBLogger, mt5_manager,
+                 order_manager=None,
+                 check_interval: int = 30):
+        """
+        Initialize the system monitor.
 
-    # Wire the container with the current module
-    container.wire(modules=[__name__])
+        Args:
+            logger: Logger instance
+            mt5_manager: MT5 manager instance
+            order_manager: Optional order manager instance
+            check_interval: Check interval in seconds (default: 30)
+        """
+        self.logger = logger
+        self.mt5_manager = mt5_manager
+        self.order_manager = order_manager
+        self.check_interval = check_interval
 
-    return container
+        self._running = False
+        self._thread = None
+        self._stop_event = threading.Event()
+
+    def start(self) -> bool:
+        """Start the system monitor"""
+        if self._running:
+            return True
+
+        try:
+            self._stop_event.clear()
+            self._running = True
+            self._thread = threading.Thread(target=self._monitor_loop)
+            self._thread.daemon = True
+            self._thread.start()
+
+            self.logger.log_event(
+                level="INFO",
+                message="System monitor started",
+                event_type="SYSTEM_MONITOR",
+                component="system_monitor",
+                action="start",
+                status="success"
+            )
+            return True
+
+        except Exception as e:
+            self._running = False
+            self.logger.log_error(
+                level="ERROR",
+                message=f"Failed to start system monitor: {str(e)}",
+                exception_type=type(e).__name__,
+                function="start",
+                traceback=str(e),
+                context={}
+            )
+            return False
+
+    def stop(self) -> None:
+        """Stop the system monitor"""
+        if not self._running:
+            return
+
+        try:
+            self._stop_event.set()
+
+            if self._thread and self._thread.is_alive():
+                self._thread.join(timeout=10)
+
+            self._running = False
+
+            self.logger.log_event(
+                level="INFO",
+                message="System monitor stopped",
+                event_type="SYSTEM_MONITOR",
+                component="system_monitor",
+                action="stop",
+                status="success"
+            )
+
+        except Exception as e:
+            self.logger.log_error(
+                level="ERROR",
+                message=f"Error stopping system monitor: {str(e)}",
+                exception_type=type(e).__name__,
+                function="stop",
+                traceback=str(e),
+                context={}
+            )
+            # Mark as not running even if there was an error
+            self._running = False
+
+    def _monitor_loop(self) -> None:
+        """Main monitoring loop"""
+        last_gc = time.time()
+        gc_interval = 300  # Run garbage collection every 5 minutes
+
+        while not self._stop_event.is_set():
+            try:
+                # Check MT5 connection
+                self._check_mt5_connection()
+
+                # Check system resources if psutil is available
+                try:
+                    import psutil
+                    self._check_system_resources()
+                except ImportError:
+                    # psutil not available, skip resource check
+                    pass
+
+                # Check trading activity
+                if self.order_manager:
+                    self._check_trading_activity()
+
+                # Run periodic garbage collection
+                current_time = time.time()
+                if current_time - last_gc >= gc_interval:
+                    import gc
+                    gc.collect()
+                    last_gc = current_time
+
+                    self.logger.log_event(
+                        level="INFO",
+                        message="Performed garbage collection",
+                        event_type="SYSTEM_MONITOR",
+                        component="system_monitor",
+                        action="_monitor_loop",
+                        status="gc_completed"
+                    )
+
+                # Sleep until next check
+                time.sleep(self.check_interval)
+
+            except Exception as e:
+                self.logger.log_error(
+                    level="ERROR",
+                    message=f"Error in system monitor loop: {str(e)}",
+                    exception_type=type(e).__name__,
+                    function="_monitor_loop",
+                    traceback=str(e),
+                    context={}
+                )
+                # Sleep before retrying to avoid excessive logging
+                time.sleep(5)
+
+    def _check_mt5_connection(self) -> None:
+        """Check MT5 connection status"""
+        try:
+            if not self.mt5_manager.ensure_connection():
+                self.logger.log_error(
+                    level="WARNING",
+                    message="MT5 connection lost, attempting to reconnect",
+                    exception_type="MT5ConnectionError",
+                    function="_check_mt5_connection",
+                    traceback="",
+                    context={}
+                )
+
+                # Connection will be automatically restored by ensure_connection
+            else:
+                # Get server time to verify active connection
+                server_time = self.mt5_manager.get_server_time()
+                if server_time:
+                    self.logger.log_event(
+                        level="DEBUG",
+                        message="MT5 connection verified",
+                        event_type="SYSTEM_MONITOR",
+                        component="system_monitor",
+                        action="_check_mt5_connection",
+                        status="success",
+                        details={"server_time": str(server_time)}
+                    )
+                else:
+                    self.logger.log_error(
+                        level="WARNING",
+                        message="MT5 connected but cannot get server time",
+                        exception_type="MT5DataError",
+                        function="_check_mt5_connection",
+                        traceback="",
+                        context={}
+                    )
+
+        except Exception as e:
+            self.logger.log_error(
+                level="ERROR",
+                message=f"Error checking MT5 connection: {str(e)}",
+                exception_type=type(e).__name__,
+                function="_check_mt5_connection",
+                traceback=str(e),
+                context={}
+            )
+
+    def _check_system_resources(self) -> None:
+        """Check system resource usage"""
+        try:
+            import psutil
+
+            # Get CPU usage
+            cpu_percent = psutil.cpu_percent(interval=1)
+
+            # Get memory usage
+            memory = psutil.virtual_memory()
+            memory_percent = memory.percent
+
+            # Get process information
+            process = psutil.Process()
+            process_cpu = process.cpu_percent(interval=1)
+            process_memory = process.memory_info().rss / (1024 * 1024)  # MB
+
+            # Log if resource usage is high
+            if cpu_percent > 80 or memory_percent > 80:
+                self.logger.log_event(
+                    level="WARNING",
+                    message="High system resource usage detected",
+                    event_type="SYSTEM_MONITOR",
+                    component="system_monitor",
+                    action="_check_system_resources",
+                    status="high_usage",
+                    details={
+                        "cpu_percent": cpu_percent,
+                        "memory_percent": memory_percent,
+                        "process_cpu": process_cpu,
+                        "process_memory_mb": process_memory
+                    }
+                )
+            else:
+                self.logger.log_event(
+                    level="DEBUG",
+                    message="System resources normal",
+                    event_type="SYSTEM_MONITOR",
+                    component="system_monitor",
+                    action="_check_system_resources",
+                    status="normal",
+                    details={
+                        "cpu_percent": cpu_percent,
+                        "memory_percent": memory_percent,
+                        "process_cpu": process_cpu,
+                        "process_memory_mb": process_memory
+                    }
+                )
+
+        except Exception as e:
+            self.logger.log_error(
+                level="ERROR",
+                message=f"Error checking system resources: {str(e)}",
+                exception_type=type(e).__name__,
+                function="_check_system_resources",
+                traceback=str(e),
+                context={}
+            )
+
+    def _check_trading_activity(self) -> None:
+        """Check trading activity and account status"""
+        try:
+            # Get open positions
+            positions = self.mt5_manager.get_positions()
+
+            # Get account info
+            account_info = self.mt5_manager.get_account_info()
+
+            if not account_info:
+                self.logger.log_error(
+                    level="WARNING",
+                    message="Failed to get account information",
+                    exception_type="MT5DataError",
+                    function="_check_trading_activity",
+                    traceback="",
+                    context={}
+                )
+                return
+
+            # Check margin level
+            margin_level = account_info.get('margin_level', 0)
+
+            # Warning if margin level is low
+            if margin_level < 200 and margin_level > 0:
+                self.logger.log_event(
+                    level="WARNING",
+                    message=f"Low margin level: {margin_level}%",
+                    event_type="SYSTEM_MONITOR",
+                    component="system_monitor",
+                    action="_check_trading_activity",
+                    status="low_margin",
+                    details={
+                        "margin_level": margin_level,
+                        "balance": account_info.get('balance'),
+                        "equity": account_info.get('equity')
+                    }
+                )
+
+            # Log trading activity
+            self.logger.log_event(
+                level="INFO",
+                message=f"Trading activity: {len(positions)} open positions",
+                event_type="SYSTEM_MONITOR",
+                component="system_monitor",
+                action="_check_trading_activity",
+                status="success",
+                details={
+                    "open_positions": len(positions),
+                    "balance": account_info.get('balance'),
+                    "equity": account_info.get('equity'),
+                    "margin_level": margin_level
+                }
+            )
+
+        except Exception as e:
+            self.logger.log_error(
+                level="ERROR",
+                message=f"Error checking trading activity: {str(e)}",
+                exception_type=type(e).__name__,
+                function="_check_trading_activity",
+                traceback=str(e),
+                context={}
+            )
 
 
 if __name__ == "__main__":
-    # Initialize the container
-    container = init_container()
-
-    # Setup complete - create and run the trading bot (dependencies injected automatically)
-    bot = TradingBot()
-    bot.run()
+    try:
+        # Initialize and run trading bot
+        bot = TradingBot()
+        bot.run()
+    except Exception as e:
+        print(f"Unhandled exception: {str(e)}")
+        traceback.print_exc()
+        sys.exit(1)
