@@ -57,23 +57,33 @@ class StrategyManager:
         # Subscribe to events
         self._subscribe_to_events()
 
+    # First, let's modify the _initialize_mappings method in Strategies/strategy_manager.py
+
     def _initialize_mappings(self):
         """Initialize timeframe and instrument mappings from database"""
         try:
-            # Get all timeframes
-            timeframes = self.db_manager.get_all_timeframes()
-            for tf in timeframes:
-                # Find matching TimeFrame enum
-                for enum_tf in TimeFrame:
-                    if enum_tf.name == tf.name:
-                        self.timeframe_ids[enum_tf] = tf.id
-                        self.timeframe_by_id[tf.id] = enum_tf
-                        break
+            # Always use a fresh session to ensure objects are attached
+            with self.db_manager._db_session.session_scope() as session:
+                # Import models directly to avoid circular imports
+                from Database.models import Timeframe, Instrument
 
-            # Get all instruments
-            instruments = self.db_manager.get_all_instruments()
-            for instrument in instruments:
-                self.instrument_ids[instrument.symbol] = instrument.id
+                # Get all timeframes in this session
+                timeframes = session.query(Timeframe).all()
+
+                # Build timeframe mappings within the active session
+                for tf in timeframes:
+                    for enum_tf in TimeFrame:
+                        if enum_tf.name == tf.name:
+                            self.timeframe_ids[enum_tf] = tf.id
+                            self.timeframe_by_id[tf.id] = enum_tf
+                            break
+
+                # Get all instruments in this same session
+                instruments = session.query(Instrument).all()
+
+                # Build instrument mappings within the active session
+                for instrument in instruments:
+                    self.instrument_ids[instrument.symbol] = instrument.id
 
             self.logger.log_event(
                 level="INFO",

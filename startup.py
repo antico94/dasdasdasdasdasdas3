@@ -11,9 +11,13 @@ from Strategies.config import trading_strategies_config, StrategyType, TimeFrame
 from Database.db_manager import DatabaseManager
 from Events.event_bus import EventBus
 from Logger.logger import DBLogger
+from Strategies.ichimoku_strategy import IchimokuStrategy
+from Strategies.mean_reversion_strategy import MeanReversionStrategy
+from Strategies.momentum_strategy import MomentumStrategy
 from Strategies.timeframe_manager import TimeframeManager
 from Strategies.breakout_strategy import BreakoutStrategy
 from Strategies.strategy_manager import StrategyManager
+from Strategies.triple_ma_strategy import TripleMAStrategy
 from execution.order_manager import OrderManager
 from MT5.mt5_manager import MT5Manager
 from Data.data_fetcher import DataFetcher
@@ -289,49 +293,44 @@ class TradingBotStartup:
     def _init_strategy_manager(self) -> None:
         """Initialize strategy manager"""
         try:
-            # Import the database models
-            from Database.models import Timeframe as DbTimeframe, Instrument
-
-            # Create raw data mappings
-
-            timeframe_data = []
-            instrument_data = []
-
             # Get database manager - it's already initialized
             db_manager = self.components['db_manager']
 
-            # Get all timeframes using the database manager's public methods
-            timeframes = db_manager.get_all_timeframes()
-            instruments = db_manager.get_all_instruments()
-
-            # Extract the data we need without keeping references to SQLAlchemy objects
-            timeframe_data = [(tf.id, tf.name) for tf in timeframes]
-            instrument_data = [(instr.id, instr.symbol) for instr in instruments]
-
-            # Create strategy manager
+            # Create strategy manager instance
             strategy_manager = StrategyManager(
                 event_bus=self.components['event_bus'],
                 db_manager=db_manager,
                 logger=self.logger
             )
 
-            # Initialize the mappings manually without relying on the manager's initialization
-            strategy_manager.timeframe_ids = {}
-            strategy_manager.timeframe_by_id = {}
-            strategy_manager.instrument_ids = {}
-
-            # Build mappings from raw data
-            for tf_id, tf_name in timeframe_data:
-                for enum_tf in TimeFrame:
-                    if enum_tf.name == tf_name:
-                        strategy_manager.timeframe_ids[enum_tf] = tf_id
-                        strategy_manager.timeframe_by_id[tf_id] = enum_tf
-                        break
-
-            for instr_id, symbol in instrument_data:
-                strategy_manager.instrument_ids[symbol] = instr_id
-
+            # Store the manager in components dictionary first
             self.components['strategy_manager'] = strategy_manager
+
+            # Now use a single session scope to initialize all mappings
+            with db_manager._db_session.session_scope() as session:
+                # Import the models
+                from Database.models import Timeframe, Instrument
+
+                # Get all timeframes and instruments in a single query
+                timeframes = session.query(Timeframe).all()
+                instruments = session.query(Instrument).all()
+
+                # Initialize mappings directly while session is still active
+                strategy_manager.timeframe_ids = {}
+                strategy_manager.timeframe_by_id = {}
+                strategy_manager.instrument_ids = {}
+
+                # Build timeframe mappings
+                for tf in timeframes:
+                    for enum_tf in TimeFrame:
+                        if enum_tf.name == tf.name:
+                            strategy_manager.timeframe_ids[enum_tf] = tf.id
+                            strategy_manager.timeframe_by_id[tf.id] = enum_tf
+                            break
+
+                # Build instrument mappings
+                for instr in instruments:
+                    strategy_manager.instrument_ids[instr.symbol] = instr.id
 
             self.logger.log_event(
                 level="INFO",
@@ -341,8 +340,8 @@ class TradingBotStartup:
                 action="_init_strategy_manager",
                 status="success",
                 details={
-                    "timeframes_count": len(timeframe_data),
-                    "instruments_count": len(instrument_data)
+                    "timeframes_count": len(strategy_manager.timeframe_ids),
+                    "instruments_count": len(strategy_manager.instrument_ids)
                 }
             )
         except Exception as e:
@@ -407,13 +406,14 @@ class TradingBotStartup:
                         )
                         continue
 
+                    # Get common parameters
+                    indicators = strategy_config.indicators
+                    risk = strategy_config.risk_management
+                    custom_params = strategy_config.custom_parameters
+
                     # Create specific strategy instance based on strategy type
                     if strategy_config.strategy_type == StrategyType.BREAKOUT:
                         # Extract breakout-specific settings
-                        indicators = strategy_config.indicators
-                        risk = strategy_config.risk_management
-                        custom_params = strategy_config.custom_parameters
-
                         donchian_config = indicators.donchian_channels
                         bb_config = indicators.bollinger_bands
                         atr_config = indicators.atr
@@ -438,6 +438,125 @@ class TradingBotStartup:
                             adx_threshold=adx_config.threshold if adx_config else 25.0
                         )
 
+                    elif strategy_config.strategy_type == StrategyType.ICHIMOKU:
+                        # Extract Ichimoku-specific settings
+                        ichimoku_config = indicators.ichimoku
+                        adx_config = indicators.adx
+
+                        # Register the strategy
+                        self.components['strategy_manager'].register_strategy(
+                            strategy_class=IchimokuStrategy,
+                            name=strategy_name,
+                            symbol=symbol,
+                            timeframes=tf_set,
+                            # Extract parameters from nested configs
+                            tenkan_period=ichimoku_config.tenkan_period if ichimoku_config else 9,
+                            kijun_period=ichimoku_config.kijun_period if ichimoku_config else 26,
+                            senkou_span_b_period=ichimoku_config.senkou_span_b_period if ichimoku_config else 52,
+                            displacement=ichimoku_config.displacement if ichimoku_config else 26,
+                            require_kumo_breakout=custom_params.get('require_kumo_breakout', True),
+                            require_chikou_confirmation=custom_params.get('require_chikou_confirmation', True),
+                            adx_period=adx_config.period if adx_config else 14,
+                            adx_threshold=adx_config.threshold if adx_config else 25.0
+                        )
+
+                    elif strategy_config.strategy_type == StrategyType.TRIPLE_MA:
+                        # Extract Triple MA-specific settings
+                        triple_ma_config = indicators.triple_ma
+                        adx_config = indicators.adx
+                        macd_config = indicators.macd
+
+                        # Register the strategy
+                        self.components['strategy_manager'].register_strategy(
+                            strategy_class=TripleMAStrategy,
+                            name=strategy_name,
+                            symbol=symbol,
+                            timeframes=tf_set,
+                            # Extract parameters from nested configs
+                            short_period=triple_ma_config.short_period if triple_ma_config else 8,
+                            medium_period=triple_ma_config.medium_period if triple_ma_config else 21,
+                            long_period=triple_ma_config.long_period if triple_ma_config else 55,
+                            ma_type=triple_ma_config.ma_type if triple_ma_config else "EMA",
+                            adx_period=adx_config.period if adx_config else 14,
+                            adx_threshold=adx_config.threshold if adx_config else 25.0,
+                            require_macd_confirmation=custom_params.get('require_macd_confirmation', False),
+                            stop_loss_atr_multiplier=risk.stop_loss_atr_multiplier,
+                            take_profit_atr_multiplier=risk.take_profit_atr_multiplier
+                        )
+
+                    elif strategy_config.strategy_type == StrategyType.MEAN_REVERSION:
+                        # Extract Mean Reversion-specific settings
+                        rsi_config = indicators.rsi
+                        stoch_config = indicators.stochastic
+                        bb_config = indicators.bollinger_bands
+
+                        # Register the strategy
+                        self.components['strategy_manager'].register_strategy(
+                            strategy_class=MeanReversionStrategy,
+                            name=strategy_name,
+                            symbol=symbol,
+                            timeframes=tf_set,
+                            # Extract parameters from nested configs
+                            rsi_period=rsi_config.period if rsi_config else 14,
+                            rsi_oversold=rsi_config.oversold_level if rsi_config else 30.0,
+                            rsi_overbought=rsi_config.overbought_level if rsi_config else 70.0,
+                            stoch_k_period=stoch_config.k_period if stoch_config else 14,
+                            stoch_d_period=stoch_config.d_period if stoch_config else 3,
+                            stoch_oversold=stoch_config.oversold_level if stoch_config else 20.0,
+                            stoch_overbought=stoch_config.overbought_level if stoch_config else 80.0,
+                            bb_period=bb_config.period if bb_config else 20,
+                            bb_std_dev=bb_config.deviation if bb_config else 2.0,
+                            use_ibs=custom_params.get('internal_bar_strength', True),
+                            ibs_threshold_low=custom_params.get('ibs_threshold_low', 0.2),
+                            ibs_threshold_high=custom_params.get('ibs_threshold_high', 0.8),
+                            stop_loss_atr_multiplier=risk.stop_loss_atr_multiplier,
+                            take_profit_atr_multiplier=risk.take_profit_atr_multiplier
+                        )
+
+                    elif strategy_config.strategy_type == StrategyType.MOMENTUM:
+                        # Extract Momentum-specific settings
+                        macd_config = indicators.macd
+                        rsi_config = indicators.rsi
+                        ma_config = indicators.ma
+
+                        # Register the strategy
+                        self.components['strategy_manager'].register_strategy(
+                            strategy_class=MomentumStrategy,
+                            name=strategy_name,
+                            symbol=symbol,
+                            timeframes=tf_set,
+                            # Extract parameters from nested configs
+                            macd_fast_period=macd_config.fast_period if macd_config else 12,
+                            macd_slow_period=macd_config.slow_period if macd_config else 26,
+                            macd_signal_period=macd_config.signal_period if macd_config else 9,
+                            rsi_period=rsi_config.period if rsi_config else 14,
+                            rsi_threshold_low=custom_params.get('rsi_threshold_low', 40.0),
+                            rsi_threshold_high=custom_params.get('rsi_threshold_high', 60.0),
+                            ma_period=ma_config.period if ma_config else 50,
+                            ma_type=ma_config.ma_type if ma_config else "EMA",
+                            require_volume_confirmation=custom_params.get('require_volume_confirmation', True),
+                            volume_threshold=custom_params.get('volume_threshold', 1.5),
+                            stop_loss_atr_multiplier=risk.stop_loss_atr_multiplier,
+                            take_profit_atr_multiplier=risk.take_profit_atr_multiplier
+                        )
+
+                    else:
+                        # Log unsupported strategy type
+                        self.logger.log_error(
+                            level="ERROR",
+                            message=f"Unsupported strategy type {strategy_config.strategy_type.value} for {strategy_name}",
+                            exception_type="ConfigError",
+                            function="_register_strategies",
+                            traceback="",
+                            context={"strategy_name": strategy_name,
+                                     "strategy_type": strategy_config.strategy_type.value}
+                        )
+                        continue
+
+                    # If strategy was registered successfully, log it
+                    if strategy_config.strategy_type in [StrategyType.BREAKOUT, StrategyType.ICHIMOKU,
+                                                         StrategyType.TRIPLE_MA, StrategyType.MEAN_REVERSION,
+                                                         StrategyType.MOMENTUM]:
                         self.logger.log_event(
                             level="INFO",
                             message=f"Registered {strategy_name} for {symbol}",
@@ -451,17 +570,6 @@ class TradingBotStartup:
                                 "timeframes": [tf.name for tf in tf_set],
                                 "strategy_type": strategy_config.strategy_type.value
                             }
-                        )
-                    else:
-                        # Log unsupported strategy type
-                        self.logger.log_error(
-                            level="ERROR",
-                            message=f"Unsupported strategy type {strategy_config.strategy_type.value} for {strategy_name}",
-                            exception_type="ConfigError",
-                            function="_register_strategies",
-                            traceback="",
-                            context={"strategy_name": strategy_name,
-                                     "strategy_type": strategy_config.strategy_type.value}
                         )
 
             # Log summary

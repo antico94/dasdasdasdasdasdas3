@@ -438,3 +438,44 @@ class DatabaseManager:
                 context={"count": len(bars)}
             )
             raise
+
+    # First, modify the DatabaseManager methods to return detached data
+
+    # In Database/db_manager.py
+    def get_all_timeframes_detached(self) -> List[dict]:
+        """Get all timeframes as detached dictionaries"""
+        try:
+            with self._db_session.session_scope() as session:
+                timeframes = session.query(Timeframe).all()
+                # Convert to detached dictionaries
+                return [{"id": tf.id, "name": tf.name, "description": tf.description, "minutes": tf.minutes} for tf in
+                        timeframes]
+        except SQLAlchemyError as e:
+            self._logger.log_error(
+                level="ERROR",
+                message=f"Failed to get detached timeframes: {str(e)}",
+                exception_type=type(e).__name__,
+                function="get_all_timeframes_detached",
+                traceback=str(e),
+                context={}
+            )
+            raise
+
+    def get_all_instruments_detached(self) -> List[dict]:
+        """Get all instruments as detached dictionaries"""
+        try:
+            with self._db_session.session_scope() as session:
+                instruments = session.query(Instrument).all()
+                # Convert to detached dictionaries
+                return [{"id": instr.id, "symbol": instr.symbol, "description": instr.description} for instr in
+                        instruments]
+        except SQLAlchemyError as e:
+            self._logger.log_error(
+                level="ERROR",
+                message=f"Failed to get detached instruments: {str(e)}",
+                exception_type=type(e).__name__,
+                function="get_all_instruments_detached",
+                traceback=str(e),
+                context={}
+            )
+            raise
