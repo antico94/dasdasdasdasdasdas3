@@ -1,10 +1,10 @@
 # MT5/mt5_manager.py
-import MetaTrader5 as mt5
-import time
-from typing import Dict, List, Any, Optional, Tuple
-from datetime import datetime, timedelta, timezone
 import threading
-import sys
+import time
+from datetime import datetime, timezone
+from typing import Dict, List, Any, Optional
+
+import MetaTrader5 as mt5
 
 from Config.trading_config import ConfigManager, TimeFrame
 from Logger.logger import DBLogger
@@ -372,69 +372,6 @@ class MT5Manager:
                 function="copy_rates_from_pos",
                 traceback=str(e),
                 context={"symbol": symbol, "timeframe": timeframe.name, "start_pos": start_pos, "count": count}
-            )
-            return None
-
-    def copy_rates_from(self, symbol: str, timeframe: TimeFrame, from_date: datetime, count: int) -> Optional[
-        List[Dict[str, Any]]]:
-        """Copy rates from specific date"""
-        if not self.ensure_connection():
-            return None
-
-        try:
-            mt5_timeframe = timeframe.mt5_timeframe
-
-            # Ensure from_date is timezone-aware before sending to MT5
-            if from_date.tzinfo is None:
-                from_date = from_date.replace(tzinfo=timezone.utc)
-
-            # Copy rates
-            rates = mt5.copy_rates_from(symbol, mt5_timeframe, from_date, count)
-
-            if rates is None:
-                error = mt5.last_error()
-                self._logger.log_error(
-                    level="ERROR",
-                    message=f"Failed to copy rates for {symbol}/{timeframe.name} from {from_date}: {error}",
-                    exception_type="MT5DataError",
-                    function="copy_rates_from",
-                    traceback="",
-                    context={
-                        "symbol": symbol,
-                        "timeframe": timeframe.name,
-                        "from_date": from_date,
-                        "count": count,
-                        "error_code": error[0],
-                        "error_message": error[1]
-                    }
-                )
-                return None
-
-            # Convert to list of dictionaries
-            result = []
-            for rate in rates:
-                rate_dict = {
-                    "time": datetime.fromtimestamp(rate[0], tz=timezone.utc).replace(tzinfo=None),
-                    "open": rate[1],
-                    "high": rate[2],
-                    "low": rate[3],
-                    "close": rate[4],
-                    "tick_volume": rate[5],
-                    "spread": rate[6],
-                    "real_volume": rate[7]
-                }
-                result.append(rate_dict)
-
-            return result
-
-        except Exception as e:
-            self._logger.log_error(
-                level="ERROR",
-                message=f"Error copying rates for {symbol}/{timeframe.name} from {from_date}: {str(e)}",
-                exception_type=type(e).__name__,
-                function="copy_rates_from",
-                traceback=str(e),
-                context={"symbol": symbol, "timeframe": timeframe.name, "from_date": from_date, "count": count}
             )
             return None
 

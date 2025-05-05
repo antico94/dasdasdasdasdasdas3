@@ -1,10 +1,7 @@
 # Strategies/triple_ma_strategy.py
-from typing import Dict, Any, List, Optional, Set
-
-import numpy as np
+from typing import Optional, Set
 
 from Config.trading_config import TimeFrame
-from Database.models import PriceBar
 from Events.events import SignalEvent
 from Strategies.base_strategy import BaseStrategy
 from Strategies.indicator_utils import IndicatorUtils, MAType

@@ -983,10 +983,8 @@ class IndicatorUtils:
             # Previous candle is bearish (close < open)
             # Current candle is bullish (close > open)
             # Current candle engulfs previous (open < prev close AND close > prev open)
-            if (close[i - 1] < open_prices[i - 1] and  # Previous candle is bearish
-                    close[i] > open_prices[i] and  # Current candle is bullish
-                    open_prices[i] < close[i - 1] and  # Current open is lower than previous close
-                    close[i] > open_prices[i - 1]):  # Current close is higher than previous open
+            if (open_prices[i] < close[i - 1] < open_prices[i - 1] < close[i] and  # Previous candle is bearish
+                    close[i] > open_prices[i]):  # Current close is higher than previous open
                 pattern[i] = True
 
         return pattern
@@ -1016,10 +1014,8 @@ class IndicatorUtils:
             # Previous candle is bullish (close > open)
             # Current candle is bearish (close < open)
             # Current candle engulfs previous (open > prev close AND close < prev open)
-            if (close[i - 1] > open_prices[i - 1] and  # Previous candle is bullish
-                    close[i] < open_prices[i] and  # Current candle is bearish
-                    open_prices[i] > close[i - 1] and  # Current open is higher than previous close
-                    close[i] < open_prices[i - 1]):  # Current close is lower than previous open
+            if (open_prices[i] > close[i - 1] > open_prices[i - 1] > close[i] and  # Previous candle is bullish
+                    close[i] < open_prices[i]):  # Current close is lower than previous open
                 pattern[i] = True
 
         return pattern
@@ -1442,11 +1438,11 @@ class IndicatorUtils:
 
         for i in range(min_period, len(prices)):
             # Bullish: short > medium > long
-            if short_ma[i] > medium_ma[i] and medium_ma[i] > long_ma[i]:
+            if short_ma[i] > medium_ma[i] > long_ma[i]:
                 bullish_setups[i] = True
 
             # Bearish: short < medium < long
-            if short_ma[i] < medium_ma[i] and medium_ma[i] < long_ma[i]:
+            if short_ma[i] < medium_ma[i] < long_ma[i]:
                 bearish_setups[i] = True
 
         return bullish_setups, bearish_setups

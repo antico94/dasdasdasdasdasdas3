@@ -1,11 +1,8 @@
 # Strategies/breakout_strategy.py
-from typing import Dict, Any, List, Optional
+from typing import Optional
 import numpy as np
-from datetime import datetime
-
-from Events.events import SignalEvent
-from Database.models import PriceBar
 from Config.trading_config import TimeFrame
+from Events.events import SignalEvent
 from Strategies.base_strategy import BaseStrategy
 from Strategies.indicator_utils import IndicatorUtils
 
@@ -189,11 +186,11 @@ class BreakoutStrategy(BaseStrategy):
             lower = donchian_lower[-2]
 
             # Bullish breakout: close above upper Donchian
-            if previous_bar.close <= upper and current_bar.close > upper:
+            if previous_bar.close <= upper < current_bar.close:
                 return 1
 
             # Bearish breakout: close below lower Donchian
-            if previous_bar.close >= lower and current_bar.close < lower:
+            if previous_bar.close >= lower > current_bar.close:
                 return -1
 
         # Check Bollinger Band breakout
@@ -205,11 +202,11 @@ class BreakoutStrategy(BaseStrategy):
             lower = bollinger_lower[-2]
 
             # Bullish breakout: close above upper Bollinger Band
-            if previous_bar.close <= upper and current_bar.close > upper:
+            if previous_bar.close <= upper < current_bar.close:
                 return 1
 
             # Bearish breakout: close below lower Bollinger Band
-            if previous_bar.close >= lower and current_bar.close < lower:
+            if previous_bar.close >= lower > current_bar.close:
                 return -1
 
         return 0

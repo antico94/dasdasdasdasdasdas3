@@ -1,7 +1,7 @@
 # Events/events.py
 from datetime import datetime
-from typing import Dict, Any, Optional
 from enum import Enum
+from typing import Optional
 
 from Database.models import PriceBar
 

@@ -1,5 +1,5 @@
 # Strategies/momentum_strategy.py
-from typing import Dict, Any, List, Optional, Set
+from typing import Optional, Set
 
 import numpy as np
 

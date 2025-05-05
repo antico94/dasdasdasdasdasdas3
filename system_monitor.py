@@ -294,7 +294,7 @@ class SystemMonitor:
             margin_level = account_info.get('margin_level', 0)
 
             # Warning if margin level is low
-            if margin_level < 200 and margin_level > 0:
+            if 200 > margin_level > 0:
                 self.logger.log_event(
                     level="WARNING",
                     message=f"Low margin level: {margin_level}%",

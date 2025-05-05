@@ -1,5 +1,5 @@
 # Strategies/ichimoku_strategy.py
-from typing import Dict, Any, List, Optional, Set
+from typing import List, Optional, Set
 
 import numpy as np
 

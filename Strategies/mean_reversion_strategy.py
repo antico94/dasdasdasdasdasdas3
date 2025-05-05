@@ -1,7 +1,5 @@
 # Strategies/mean_reversion_strategy.py
-from typing import Dict, Any, List, Optional, Set
-
-import numpy as np
+from typing import Optional, Set
 
 from Config.trading_config import TimeFrame
 from Database.models import PriceBar
@@ -301,7 +299,7 @@ class MeanReversionStrategy(BaseStrategy):
 
         # Count how many indicators confirm oversold condition
         oversold_count = 0
-        total_indicators = 3 + (1 if self.use_ibs else 0)
+        # total_indicators = 3 + (1 if self.use_ibs else 0)
 
         # Check RSI
         if rsi is not None and rsi[-1] < self.rsi_oversold:
@@ -343,7 +341,7 @@ class MeanReversionStrategy(BaseStrategy):
 
         # Count how many indicators confirm overbought condition
         overbought_count = 0
-        total_indicators = 3 + (1 if self.use_ibs else 0)
+        # total_indicators = 3 + (1 if self.use_ibs else 0)
 
         # Check RSI
         if rsi is not None and rsi[-1] > self.rsi_overbought:

@@ -1,27 +1,24 @@
 # startup.py
 """Trading Bot Startup Module"""
 
-import sys
 import traceback
-from typing import Dict, Any, List, Optional, Set
 
 from Config.trading_config import ConfigManager, TimeFrame
-from Database.models import Instrument, Timeframe
-from Strategies.config import trading_strategies_config, StrategyType, TimeFrameType
+from Data.data_fetcher import DataFetcher
+from Data.scheduled_updates import TimeframeUpdateScheduler
 from Database.db_manager import DatabaseManager
 from Events.event_bus import EventBus
 from Logger.logger import DBLogger
+from MT5.mt5_manager import MT5Manager
+from Strategies.breakout_strategy import BreakoutStrategy
+from Strategies.config import trading_strategies_config, StrategyType
 from Strategies.ichimoku_strategy import IchimokuStrategy
 from Strategies.mean_reversion_strategy import MeanReversionStrategy
 from Strategies.momentum_strategy import MomentumStrategy
-from Strategies.timeframe_manager import TimeframeManager
-from Strategies.breakout_strategy import BreakoutStrategy
 from Strategies.strategy_manager import StrategyManager
+from Strategies.timeframe_manager import TimeframeManager
 from Strategies.triple_ma_strategy import TripleMAStrategy
 from execution.order_manager import OrderManager
-from MT5.mt5_manager import MT5Manager
-from Data.data_fetcher import DataFetcher
-from Data.scheduled_updates import TimeframeUpdateScheduler
 
 
 class TradingBotStartup:

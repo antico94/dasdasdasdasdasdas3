@@ -1,9 +1,8 @@
 # Events/event_bus.py
-from typing import Dict, List, Any, Callable, Optional, Set, Type
-import threading
 import queue
+import threading
 import time
-import sys
+from typing import Dict, List, Any, Callable, Optional, Type
 
 from Logger.logger import DBLogger
 
@@ -155,36 +154,6 @@ class EventBus:
                 context={}
             )
             return False
-
-    def stop(self) -> None:
-        """Stop event dispatcher thread"""
-        if not self._running:
-            return
-
-        try:
-            self._stop_event.set()
-            if self._dispatch_thread:
-                self._dispatch_thread.join(timeout=10)
-            self._running = False
-
-            self._logger.log_event(
-                level="INFO",
-                message="Event dispatcher stopped",
-                event_type="EVENT_DISPATCHER_STOP",
-                component="event_bus",
-                action="stop",
-                status="success"
-            )
-
-        except Exception as e:
-            self._logger.log_error(
-                level="ERROR",
-                message=f"Error stopping event dispatcher: {str(e)}",
-                exception_type=type(e).__name__,
-                function="stop",
-                traceback=str(e),
-                context={}
-            )
 
     def _dispatch_loop(self) -> None:
         """Main event dispatching loop"""
