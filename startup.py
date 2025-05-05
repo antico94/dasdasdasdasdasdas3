@@ -12,9 +12,11 @@ from Logger.logger import DBLogger
 from MT5.mt5_manager import MT5Manager
 from Strategies.breakout_strategy import BreakoutStrategy
 from Strategies.config import trading_strategies_config, StrategyType
+from Strategies.hybrid_strategy import HybridStrategy
 from Strategies.ichimoku_strategy import IchimokuStrategy
 from Strategies.mean_reversion_strategy import MeanReversionStrategy
 from Strategies.momentum_strategy import MomentumStrategy
+from Strategies.scalping_strategy import ScalpingStrategy
 from Strategies.strategy_manager import StrategyManager
 from Strategies.timeframe_manager import TimeframeManager
 from Strategies.triple_ma_strategy import TripleMAStrategy
@@ -537,6 +539,59 @@ class TradingBotStartup:
                             take_profit_atr_multiplier=risk.take_profit_atr_multiplier
                         )
 
+                    # Add handler for SCALPING strategy type
+                    elif strategy_config.strategy_type == StrategyType.SCALPING:
+                        # Extract Scalping-specific settings
+                        macd_config = indicators.macd
+                        rsi_config = indicators.rsi
+                        ma_config = indicators.ma
+
+                        # Register the strategy
+                        self.components['strategy_manager'].register_strategy(
+                            strategy_class=ScalpingStrategy,
+                            name=strategy_name,
+                            symbol=symbol,
+                            timeframes=tf_set,
+                            # Extract parameters from nested configs
+                            macd_fast_period=macd_config.fast_period if macd_config else 3,
+                            macd_slow_period=macd_config.slow_period if macd_config else 10,
+                            macd_signal_period=macd_config.signal_period if macd_config else 16,
+                            rsi_period=rsi_config.period if rsi_config else 5,
+                            ma_period=ma_config.period if ma_config else 20,
+                            ma_type=ma_config.ma_type if ma_config else "EMA",
+                            require_volume_confirmation=custom_params.get('require_volume_confirmation', True),
+                            volume_threshold=custom_params.get('volume_threshold', 1.5),
+                            ema_values=custom_params.get('ema_values', [5, 20, 55]),
+                            rapid_exit=custom_params.get('rapid_exit', False),
+                            max_spread_pips=custom_params.get('max_spread_pips', 1.0),
+                            alternative_macd_settings=custom_params.get('alternative_macd_settings', None),
+                            stop_loss_atr_multiplier=risk.stop_loss_atr_multiplier,
+                            take_profit_atr_multiplier=risk.take_profit_atr_multiplier
+                        )
+
+                    # Add handler for HYBRID strategy type
+                    elif strategy_config.strategy_type == StrategyType.HYBRID:
+                        # Extract Moving Average config if present
+                        ma_config = indicators.ma
+
+                        # Register the strategy
+                        self.components['strategy_manager'].register_strategy(
+                            strategy_class=HybridStrategy,
+                            name=strategy_name,
+                            symbol=symbol,
+                            timeframes=tf_set,
+                            # Extract parameters from nested configs
+                            ma_period=ma_config.period if ma_config else 100,
+                            ma_type=ma_config.ma_type if ma_config else "EMA",
+                            yield_differential_threshold=custom_params.get('yield_differential_threshold', 0.5),
+                            boj_dovish_bias=custom_params.get('boj_dovish_bias', True),
+                            us_bond_yield_rising=custom_params.get('us_bond_yield_rising', True),
+                            real_yield_filter=custom_params.get('real_yield_filter', False),
+                            max_real_yield_long=custom_params.get('max_real_yield_long', 0.0),
+                            min_real_yield_short=custom_params.get('min_real_yield_short', 0.5),
+                            stop_loss_atr_multiplier=risk.stop_loss_atr_multiplier
+                        )
+
                     else:
                         # Log unsupported strategy type
                         self.logger.log_error(
@@ -553,7 +608,8 @@ class TradingBotStartup:
                     # If strategy was registered successfully, log it
                     if strategy_config.strategy_type in [StrategyType.BREAKOUT, StrategyType.ICHIMOKU,
                                                          StrategyType.TRIPLE_MA, StrategyType.MEAN_REVERSION,
-                                                         StrategyType.MOMENTUM]:
+                                                         StrategyType.MOMENTUM, StrategyType.SCALPING,
+                                                         StrategyType.HYBRID]:
                         self.logger.log_event(
                             level="INFO",
                             message=f"Registered {strategy_name} for {symbol}",
