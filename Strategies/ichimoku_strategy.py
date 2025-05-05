@@ -157,6 +157,80 @@ class IchimokuStrategy(BaseStrategy):
                 chikou_span is None or adx is None):
             return None
 
+        # Calculate conditions
+        cloud_top = max(senkou_span_a[-1], senkou_span_b[-1])
+        cloud_bottom = min(senkou_span_a[-1], senkou_span_b[-1])
+
+        # Tenkan-Kijun cross conditions
+        tk_cross_bullish = tenkan_sen[-1] > kijun_sen[-1]
+        tk_cross_bearish = tenkan_sen[-1] < kijun_sen[-1]
+        fresh_bullish_cross = tenkan_sen[-2] <= kijun_sen[-2] and tk_cross_bullish
+        fresh_bearish_cross = tenkan_sen[-2] >= kijun_sen[-2] and tk_cross_bearish
+
+        # Price vs cloud conditions
+        price_above_cloud = current_bar.close > cloud_top
+        price_below_cloud = current_bar.close < cloud_bottom
+        price_in_cloud = current_bar.close <= cloud_top and current_bar.close >= cloud_bottom
+
+        # Cloud color
+        green_cloud = senkou_span_a[-1] > senkou_span_b[-1]
+
+        # Chikou span conditions
+        chikou_bullish = False
+        chikou_bearish = False
+
+        if len(bars) > self.displacement:
+            chikou_idx = -self.displacement - 1
+            if chikou_idx >= -len(chikou_span):
+                chikou_bullish = chikou_span[chikou_idx] > bars[chikou_idx].close
+                chikou_bearish = chikou_span[chikou_idx] < bars[chikou_idx].close
+
+        # Prepare condition groups for display
+        condition_groups = {
+            "Bullish Conditions": [
+                ("Tenkan > Kijun", tk_cross_bullish,
+                 f"T:{tenkan_sen[-1]:.4f}, K:{kijun_sen[-1]:.4f}"),
+
+                ("Fresh Bullish Cross", fresh_bullish_cross,
+                 f"Previous: T:{tenkan_sen[-2]:.4f} vs K:{kijun_sen[-2]:.4f}"),
+
+                ("Price Above Cloud", price_above_cloud,
+                 f"Price:{current_bar.close:.4f}, CloudTop:{cloud_top:.4f}"),
+
+                ("Green Cloud", green_cloud,
+                 f"SpanA:{senkou_span_a[-1]:.4f}, SpanB:{senkou_span_b[-1]:.4f}"),
+
+                ("Chikou Confirmation", chikou_bullish,
+                 "Above price" if chikou_bullish else "Below price"),
+
+                ("Strong Trend (ADX)", adx[-1] > self.adx_threshold,
+                 f"ADX:{adx[-1]:.2f}, Threshold:{self.adx_threshold}")
+            ],
+
+            "Bearish Conditions": [
+                ("Tenkan < Kijun", tk_cross_bearish,
+                 f"T:{tenkan_sen[-1]:.4f}, K:{kijun_sen[-1]:.4f}"),
+
+                ("Fresh Bearish Cross", fresh_bearish_cross,
+                 f"Previous: T:{tenkan_sen[-2]:.4f} vs K:{kijun_sen[-2]:.4f}"),
+
+                ("Price Below Cloud", price_below_cloud,
+                 f"Price:{current_bar.close:.4f}, CloudBottom:{cloud_bottom:.4f}"),
+
+                ("Red Cloud", not green_cloud,
+                 f"SpanA:{senkou_span_a[-1]:.4f}, SpanB:{senkou_span_b[-1]:.4f}"),
+
+                ("Chikou Confirmation", chikou_bearish,
+                 "Below price" if chikou_bearish else "Above price"),
+
+                ("Strong Trend (ADX)", adx[-1] > self.adx_threshold,
+                 f"ADX:{adx[-1]:.2f}, Threshold:{self.adx_threshold}")
+            ]
+        }
+
+        # Print the conditions
+        self.print_strategy_conditions(timeframe, condition_groups)
+
         # Check for bullish signal
         if bullish_signals is not None and bullish_signals[-1] and self.last_signal_type[timeframe] != "BUY":
             # Additional confirmations
@@ -176,8 +250,8 @@ class IchimokuStrategy(BaseStrategy):
                         "tenkan": tenkan_sen[-1],
                         "kijun": kijun_sen[-1],
                         "price": current_bar.close,
-                        "cloud_top": max(senkou_span_a[-1], senkou_span_b[-1]),
-                        "cloud_bottom": min(senkou_span_a[-1], senkou_span_b[-1]),
+                        "cloud_top": cloud_top,
+                        "cloud_bottom": cloud_bottom,
                         "adx": adx[-1] if adx is not None else None
                     }
                 )
@@ -214,8 +288,8 @@ class IchimokuStrategy(BaseStrategy):
                         "tenkan": tenkan_sen[-1],
                         "kijun": kijun_sen[-1],
                         "price": current_bar.close,
-                        "cloud_top": max(senkou_span_a[-1], senkou_span_b[-1]),
-                        "cloud_bottom": min(senkou_span_a[-1], senkou_span_b[-1]),
+                        "cloud_top": cloud_top,
+                        "cloud_bottom": cloud_bottom,
                         "adx": adx[-1] if adx is not None else None
                     }
                 )

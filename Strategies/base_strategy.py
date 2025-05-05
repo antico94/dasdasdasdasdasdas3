@@ -1,7 +1,7 @@
 # Strategies/base_strategy.py
 from abc import ABC, abstractmethod
 from datetime import datetime, timezone
-from typing import Dict, Any, List, Optional, Set
+from typing import Dict, Any, List, Optional, Set, Tuple
 
 import numpy as np
 
@@ -538,3 +538,47 @@ class BaseStrategy(ABC):
         )
 
         return signal
+
+    # Add to Strategies/base_strategy.py
+
+    # Add to Strategies/base_strategy.py
+
+    def print_strategy_conditions(self, timeframe: TimeFrame,
+                                  condition_groups: Dict[str, List[Tuple[str, bool, str]]]) -> None:
+        """
+        Print the current values of strategy-specific indicators and whether they meet conditions.
+
+        Args:
+            timeframe: The timeframe being analyzed
+            condition_groups: Dictionary of group_name -> list of conditions [(name, passed, details)]
+        """
+        output_lines = []
+
+        # Process each condition group
+        for group_name, conditions in condition_groups.items():
+            output_lines.append(f"=== {group_name} for {self.symbol} on {timeframe.name} ===")
+
+            # Add each condition with its status and details
+            for i, (name, passed, details) in enumerate(conditions, 1):
+                status = "✅" if passed else "❌"
+                output_lines.append(f"{i}. {name}: {status} ({details})")
+
+            # Add a blank line between groups
+            output_lines.append("")
+
+        # Remove the last empty line if there is one
+        if output_lines and output_lines[-1] == "":
+            output_lines.pop()
+
+        # Combine and print
+        output = "\n".join(output_lines)
+        print(output)
+
+        # Also log the output
+        self.log_strategy_event(
+            level="INFO",
+            message=f"Strategy conditions for {self.symbol} on {timeframe.name}",
+            action="print_strategy_conditions",
+            status="analysis",
+            details={"conditions": output}
+        )
