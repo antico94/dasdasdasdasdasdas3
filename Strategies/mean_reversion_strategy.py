@@ -178,6 +178,58 @@ class MeanReversionStrategy(BaseStrategy):
                 atr is None or (self.use_ibs and ibs is None)):
             return None
 
+        # Calculate oversold/overbought conditions
+        is_rsi_oversold = rsi[-1] < self.rsi_oversold
+        is_rsi_overbought = rsi[-1] > self.rsi_overbought
+
+        is_stoch_oversold = stoch_k[-1] < self.stoch_oversold and stoch_d[-1] < self.stoch_oversold
+        is_stoch_overbought = stoch_k[-1] > self.stoch_overbought and stoch_d[-1] > self.stoch_overbought
+
+        is_price_at_lower_band = current_bar.close <= bb_lower[-1]
+        is_price_at_upper_band = current_bar.close >= bb_upper[-1]
+
+        is_ibs_low = self.use_ibs and ibs is not None and ibs[-1] < self.ibs_threshold_low
+        is_ibs_high = self.use_ibs and ibs is not None and ibs[-1] > self.ibs_threshold_high
+
+        # Prepare condition groups for display
+        condition_groups = {
+            "Bullish (Oversold) Conditions": [
+                ("RSI Oversold", is_rsi_oversold,
+                 f"RSI: {rsi[-1]:.2f} < {self.rsi_oversold:.2f}"),
+
+                ("Stochastic Oversold", is_stoch_oversold,
+                 f"K: {stoch_k[-1]:.2f}, D: {stoch_d[-1]:.2f} < {self.stoch_oversold:.2f}"),
+
+                ("Price at/below Lower BB", is_price_at_lower_band,
+                 f"Price: {current_bar.close:.5f}, BB Lower: {bb_lower[-1]:.5f}"),
+            ],
+
+            "Bearish (Overbought) Conditions": [
+                ("RSI Overbought", is_rsi_overbought,
+                 f"RSI: {rsi[-1]:.2f} > {self.rsi_overbought:.2f}"),
+
+                ("Stochastic Overbought", is_stoch_overbought,
+                 f"K: {stoch_k[-1]:.2f}, D: {stoch_d[-1]:.2f} > {self.stoch_overbought:.2f}"),
+
+                ("Price at/above Upper BB", is_price_at_upper_band,
+                 f"Price: {current_bar.close:.5f}, BB Upper: {bb_upper[-1]:.5f}"),
+            ]
+        }
+
+        # Add IBS conditions if used
+        if self.use_ibs:
+            condition_groups["Bullish (Oversold) Conditions"].append(
+                ("IBS Low", is_ibs_low,
+                 f"IBS: {ibs[-1]:.2f} < {self.ibs_threshold_low:.2f}" if ibs is not None else "N/A")
+            )
+            condition_groups["Bearish (Overbought) Conditions"].append(
+                ("IBS High", is_ibs_high,
+                 f"IBS: {ibs[-1]:.2f} > {self.ibs_threshold_high:.2f}" if ibs is not None else "N/A")
+            )
+
+        # Print the conditions
+        self.print_strategy_conditions(timeframe, condition_groups)
+
         # Check for oversold condition (long signal)
         if self._is_oversold(timeframe, current_bar) and self.last_signal_type[timeframe] != "BUY":
             # Calculate entry, stop loss, and take profit
