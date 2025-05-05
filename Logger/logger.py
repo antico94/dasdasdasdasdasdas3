@@ -98,7 +98,7 @@ class DBLogger:
     def log_event(self, level: str, message: str, event_type: str, component: str,
                   action: str = None, status: str = "success", details: Dict[str, Any] = None):
         """
-        Log an event with enhanced context
+        Log an event with enhanced context, with truncation protection
 
         Args:
             level: Log level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
@@ -109,6 +109,52 @@ class DBLogger:
             status: Outcome status (success, failure, pending, etc.)
             details: Additional structured details as a dictionary
         """
+        # Ensure message fits within database field limits (500 chars)
+        if len(message) > 450:
+            message = message[:447] + "..."
+
+        # Ensure event_type, component, action, status fields stay within limits
+        if event_type and len(event_type) > 45:
+            event_type = event_type[:42] + "..."
+
+        if component and len(component) > 45:
+            component = component[:42] + "..."
+
+        if action and len(action) > 95:
+            action = action[:92] + "..."
+
+        if status and len(status) > 15:
+            status = status[:12] + "..."
+
+        # Convert details to a simple short string to avoid truncation issues
+        safe_details = None
+        if details:
+            try:
+                # First try to serialize with minimal information
+                simple_details = {}
+                for k, v in details.items():
+                    if isinstance(v, (int, float, bool, str)):
+                        # For strings, limit length
+                        if isinstance(v, str) and len(v) > 20:
+                            simple_details[k] = v[:17] + "..."
+                        else:
+                            simple_details[k] = v
+                    else:
+                        # For complex types, just use type name
+                        simple_details[k] = f"{type(v).__name__}"
+
+                # Serialize and check length
+                json_details = json.dumps(simple_details)
+                if len(json_details) > 450:  # Be conservative with JSON size
+                    # If still too long, create a minimal version
+                    safe_details = json.dumps({"truncated": True, "original_keys": list(details.keys())[:5]})
+                else:
+                    safe_details = json_details
+            except Exception:
+                # If serialization fails, provide a fallback
+                safe_details = json.dumps({"error": "Could not serialize details"})
+
+        # Call the original logger method with safe parameters
         log_method = getattr(self.logger, level.lower(), self.logger.info)
         log_method(message, extra={
             'extra': {
@@ -117,7 +163,7 @@ class DBLogger:
                 'component': component,
                 'action': action,
                 'status': status,
-                'details': details
+                'details': safe_details
             }
         })
 

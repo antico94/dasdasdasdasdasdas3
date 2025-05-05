@@ -452,7 +452,7 @@ class TripleMAStrategy(BaseStrategy):
                     message=f"Bearish signal rejected due to positive directional indicator for {self.symbol}",
                     action="_check_bearish_confirmations",
                     status="rejected",
-                    details={"plus_di": plus_di[-1], "minus_di": minus_di[-1]}
+                    details={"minus_di": minus_di[-1], "plus_di": plus_di[-1]}
                 )
                 return False
 
