@@ -134,6 +134,87 @@ class BreakoutStrategy(BaseStrategy):
         if self.session_filter and not IndicatorUtils.is_valid_session(bars[-1].timestamp, self.session_filter):
             return None
 
+        # Get the latest bars
+        current_bar = bars[-1]
+        previous_bar = bars[-2] if len(bars) > 1 else None
+
+        # Get indicators
+        donchian_upper = self.get_indicator(timeframe, 'donchian_upper')
+        donchian_lower = self.get_indicator(timeframe, 'donchian_lower')
+        bollinger_upper = self.get_indicator(timeframe, 'bollinger_upper')
+        bollinger_lower = self.get_indicator(timeframe, 'bollinger_lower')
+        atr = self.get_indicator(timeframe, 'atr')
+        adx = self.get_indicator(timeframe, 'adx')
+        plus_di = self.get_indicator(timeframe, 'plus_di')
+        minus_di = self.get_indicator(timeframe, 'minus_di')
+
+        # Ensure we have all necessary indicators
+        if (donchian_upper is None or donchian_lower is None or
+                bollinger_upper is None or bollinger_lower is None or
+                atr is None or adx is None or plus_di is None or minus_di is None):
+            return None
+
+        # Calculate breakout conditions
+        bullish_donchian_breakout = previous_bar is not None and previous_bar.close <= donchian_upper[
+            -2] < current_bar.close
+        bearish_donchian_breakout = previous_bar is not None and previous_bar.close >= donchian_lower[
+            -2] > current_bar.close
+
+        bullish_bollinger_breakout = previous_bar is not None and previous_bar.close <= bollinger_upper[
+            -2] < current_bar.close
+        bearish_bollinger_breakout = previous_bar is not None and previous_bar.close >= bollinger_lower[
+            -2] > current_bar.close
+
+        # Volatility filter
+        current_atr = atr[-1]
+        avg_atr = np.mean(atr[-20:])  # Average of last 20 ATR values
+        sufficient_volatility = current_atr >= avg_atr * self.min_volatility_trigger
+
+        # Trend strength
+        strong_trend = adx[-1] >= self.adx_threshold
+        bullish_trend = plus_di[-1] > minus_di[-1]
+        bearish_trend = minus_di[-1] > plus_di[-1]
+
+        # Prepare condition groups for display
+        condition_groups = {
+            "Bullish Breakout Conditions": [
+                ("Donchian Channel Breakout", bullish_donchian_breakout,
+                 f"Close: {current_bar.close:.5f}, Upper: {donchian_upper[-2]:.5f}"),
+
+                ("Bollinger Band Breakout", bullish_bollinger_breakout,
+                 f"Close: {current_bar.close:.5f}, Upper: {bollinger_upper[-2]:.5f}"),
+
+                ("Sufficient Volatility", sufficient_volatility,
+                 f"ATR: {current_atr:.5f}, Avg: {avg_atr:.5f}, Trigger: {avg_atr * self.min_volatility_trigger:.5f}"),
+
+                ("Strong Trend (ADX)", strong_trend,
+                 f"ADX: {adx[-1]:.2f} >= {self.adx_threshold:.2f}"),
+
+                ("Bullish Trend Direction", bullish_trend,
+                 f"+DI: {plus_di[-1]:.2f}, -DI: {minus_di[-1]:.2f}")
+            ],
+
+            "Bearish Breakout Conditions": [
+                ("Donchian Channel Breakout", bearish_donchian_breakout,
+                 f"Close: {current_bar.close:.5f}, Lower: {donchian_lower[-2]:.5f}"),
+
+                ("Bollinger Band Breakout", bearish_bollinger_breakout,
+                 f"Close: {current_bar.close:.5f}, Lower: {bollinger_lower[-2]:.5f}"),
+
+                ("Sufficient Volatility", sufficient_volatility,
+                 f"ATR: {current_atr:.5f}, Avg: {avg_atr:.5f}, Trigger: {avg_atr * self.min_volatility_trigger:.5f}"),
+
+                ("Strong Trend (ADX)", strong_trend,
+                 f"ADX: {adx[-1]:.2f} >= {self.adx_threshold:.2f}"),
+
+                ("Bearish Trend Direction", bearish_trend,
+                 f"+DI: {plus_di[-1]:.2f}, -DI: {minus_di[-1]:.2f}")
+            ]
+        }
+
+        # Print the conditions
+        self.print_strategy_conditions(timeframe, condition_groups)
+
         # Check for breakout signal
         signal_direction = self._check_breakout(timeframe)
 

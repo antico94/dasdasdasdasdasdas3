@@ -164,7 +164,18 @@ class TripleMAStrategy(BaseStrategy):
         bullish_setup = self.get_indicator(timeframe, 'bullish_setup')
         bearish_setup = self.get_indicator(timeframe, 'bearish_setup')
         adx = self.get_indicator(timeframe, 'adx')
+        plus_di = self.get_indicator(timeframe, 'plus_di')
+        minus_di = self.get_indicator(timeframe, 'minus_di')
         atr = self.get_indicator(timeframe, 'atr')
+
+        # MACD values if confirmation required
+        macd_line = None
+        macd_signal = None
+        macd_histogram = None
+        if self.require_macd_confirmation:
+            macd_line = self.get_indicator(timeframe, 'macd_line')
+            macd_signal = self.get_indicator(timeframe, 'macd_signal')
+            macd_histogram = self.get_indicator(timeframe, 'macd_histogram')
 
         # Ensure we have all necessary indicators
         if (short_ma is None or medium_ma is None or long_ma is None or
@@ -172,6 +183,77 @@ class TripleMAStrategy(BaseStrategy):
                 bullish_setup is None or bearish_setup is None or
                 adx is None or atr is None):
             return None
+
+        if self.require_macd_confirmation and (macd_line is None or macd_signal is None or macd_histogram is None):
+            return None
+
+        # Calculate conditions - use .item() to get scalar values from arrays
+        # For boolean arrays, use indexing to get specific values
+        fresh_bullish_cross = bool(crosses_above[-1])
+        fresh_bearish_cross = bool(crosses_below[-1])
+
+        current_bullish_setup = bool(bullish_setup[-1])
+        current_bearish_setup = bool(bearish_setup[-1])
+
+        strong_trend = adx[-1] >= self.adx_threshold
+
+        # Handle potential array comparison issues
+        bullish_di = False
+        bearish_di = False
+        if plus_di is not None and minus_di is not None:
+            bullish_di = plus_di[-1] > minus_di[-1]
+            bearish_di = minus_di[-1] > plus_di[-1]
+
+        macd_bullish = False
+        macd_bearish = False
+        if self.require_macd_confirmation and macd_line is not None and macd_signal is not None and macd_histogram is not None:
+            macd_bullish = macd_line[-1] > macd_signal[-1] and macd_histogram[-1] > 0
+            macd_bearish = macd_line[-1] < macd_signal[-1] and macd_histogram[-1] < 0
+
+        # Prepare condition groups for display
+        condition_groups = {
+            "Bullish Triple MA Conditions": [
+                ("Short MA crossed above Medium MA", fresh_bullish_cross,
+                 f"Cross detected at index [-1]"),
+
+                ("Bullish Setup (Short > Medium > Long)", current_bullish_setup,
+                 f"Short: {short_ma[-1]:.5f}, Medium: {medium_ma[-1]:.5f}, Long: {long_ma[-1]:.5f}"),
+
+                ("Strong Trend (ADX)", strong_trend,
+                 f"ADX: {adx[-1]:.2f} >= {self.adx_threshold:.2f}"),
+
+                ("Bullish DI", bullish_di,
+                 f"+DI: {plus_di[-1]:.2f}, -DI: {minus_di[-1]:.2f}" if plus_di is not None and minus_di is not None else "N/A")
+            ],
+
+            "Bearish Triple MA Conditions": [
+                ("Short MA crossed below Medium MA", fresh_bearish_cross,
+                 f"Cross detected at index [-1]"),
+
+                ("Bearish Setup (Short < Medium < Long)", current_bearish_setup,
+                 f"Short: {short_ma[-1]:.5f}, Medium: {medium_ma[-1]:.5f}, Long: {long_ma[-1]:.5f}"),
+
+                ("Strong Trend (ADX)", strong_trend,
+                 f"ADX: {adx[-1]:.2f} >= {self.adx_threshold:.2f}"),
+
+                ("Bearish DI", bearish_di,
+                 f"+DI: {plus_di[-1]:.2f}, -DI: {minus_di[-1]:.2f}" if plus_di is not None and minus_di is not None else "N/A")
+            ]
+        }
+
+        # Add MACD conditions if required
+        if self.require_macd_confirmation:
+            condition_groups["Bullish Triple MA Conditions"].append(
+                ("MACD Confirmation", macd_bullish,
+                 f"MACD: {macd_line[-1]:.5f}, Signal: {macd_signal[-1]:.5f}, Hist: {macd_histogram[-1]:.5f}")
+            )
+            condition_groups["Bearish Triple MA Conditions"].append(
+                ("MACD Confirmation", macd_bearish,
+                 f"MACD: {macd_line[-1]:.5f}, Signal: {macd_signal[-1]:.5f}, Hist: {macd_histogram[-1]:.5f}")
+            )
+
+        # Print the conditions
+        self.print_strategy_conditions(timeframe, condition_groups)
 
         # Check for bullish signal (short MA crosses above medium MA with bullish setup)
         if crosses_above[-1] and bullish_setup[-1] and self.last_signal_type[timeframe] != "BUY":

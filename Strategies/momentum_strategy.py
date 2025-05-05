@@ -200,6 +200,70 @@ class MomentumStrategy(BaseStrategy):
                 (self.require_volume_confirmation and volume_spike is None)):
             return None
 
+        # Calculate conditions
+        fresh_macd_cross_above = macd_crosses_above[-1]
+        fresh_macd_cross_below = macd_crosses_below[-1]
+
+        macd_above_signal = macd_line[-1] > macd_signal[-1]
+        macd_below_signal = macd_line[-1] < macd_signal[-1]
+
+        positive_histogram = macd_histogram[-1] > 0
+        negative_histogram = macd_histogram[-1] < 0
+
+        rsi_bullish = rsi[-1] > self.rsi_threshold_high
+        rsi_bearish = rsi[-1] < self.rsi_threshold_low
+
+        price_above_ma = current_bar.close > ma[-1]
+        price_below_ma = current_bar.close < ma[-1]
+
+        volume_confirmed = not self.require_volume_confirmation or (volume_spike is not None and volume_spike[-1])
+
+        # Prepare condition groups for display
+        condition_groups = {
+            "Bullish Momentum Conditions": [
+                ("MACD crossed above Signal", fresh_macd_cross_above,
+                 f"Cross detected at index [-1]"),
+
+                ("MACD above Signal", macd_above_signal,
+                 f"MACD: {macd_line[-1]:.5f}, Signal: {macd_signal[-1]:.5f}"),
+
+                ("Positive MACD Histogram", positive_histogram,
+                 f"Histogram: {macd_histogram[-1]:.5f}"),
+
+                ("RSI above threshold", rsi_bullish,
+                 f"RSI: {rsi[-1]:.2f} > {self.rsi_threshold_high:.2f}"),
+
+                ("Price above MA", price_above_ma,
+                 f"Price: {current_bar.close:.5f}, MA: {ma[-1]:.5f}"),
+
+                ("Volume Confirmation", volume_confirmed,
+                 f"Volume spike detected" if volume_confirmed else "Not required or not detected")
+            ],
+
+            "Bearish Momentum Conditions": [
+                ("MACD crossed below Signal", fresh_macd_cross_below,
+                 f"Cross detected at index [-1]"),
+
+                ("MACD below Signal", macd_below_signal,
+                 f"MACD: {macd_line[-1]:.5f}, Signal: {macd_signal[-1]:.5f}"),
+
+                ("Negative MACD Histogram", negative_histogram,
+                 f"Histogram: {macd_histogram[-1]:.5f}"),
+
+                ("RSI below threshold", rsi_bearish,
+                 f"RSI: {rsi[-1]:.2f} < {self.rsi_threshold_low:.2f}"),
+
+                ("Price below MA", price_below_ma,
+                 f"Price: {current_bar.close:.5f}, MA: {ma[-1]:.5f}"),
+
+                ("Volume Confirmation", volume_confirmed,
+                 f"Volume spike detected" if volume_confirmed else "Not required or not detected")
+            ]
+        }
+
+        # Print the conditions
+        self.print_strategy_conditions(timeframe, condition_groups)
+
         # Check for bullish momentum signal
         if macd_crosses_above[-1] and self.last_signal_type[timeframe] != "BUY":
             # Check additional confirmations
