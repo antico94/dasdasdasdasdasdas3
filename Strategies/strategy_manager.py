@@ -2,8 +2,11 @@
 import threading
 from typing import List, Set, Type, Optional, Dict, Any
 
+from sqlalchemy import and_
+
 from Config.trading_config import TimeFrame
 from Database.db_manager import DatabaseManager
+from Database.models import PriceBar
 from Events.event_bus import EventBus
 from Events.events import NewBarEvent
 from Logger.logger import DBLogger
@@ -274,6 +277,8 @@ class StrategyManager:
             all_strategies.extend(symbol_strategies.values())
         return all_strategies
 
+    # Strategy to handle deadlocks in the StrategyManager class
+
     def _on_new_bar(self, event: NewBarEvent):
         """
         Handle new bar events.
@@ -301,7 +306,86 @@ class StrategyManager:
 
             # Get all bars for this symbol and timeframe
             instrument_id = self.instrument_ids.get(symbol)
-            bars = self.db_manager.get_latest_bars(instrument_id, timeframe_id)
+
+            # CRITICAL FIX: Create copies of bars to avoid session binding issues
+            # AND handle deadlocks with retry logic
+            bars = []
+            max_retries = 3
+            retry_count = 0
+
+            while retry_count < max_retries:
+                try:
+                    with self.db_manager._db_session.session_scope() as session:
+                        # Use WITH (NOLOCK) hint via execution options to reduce deadlocks
+                        db_bars = session.query(PriceBar).filter(
+                            and_(
+                                PriceBar.instrument_id == instrument_id,
+                                PriceBar.timeframe_id == timeframe_id
+                            )
+                        ).execution_options(
+                            isolation_level="READ UNCOMMITTED"  # Equivalent to NOLOCK
+                        ).order_by(PriceBar.timestamp.desc()).limit(500).all()
+
+                        # Create detached copies of all bars
+                        for bar in db_bars:
+                            bar_copy = PriceBar(
+                                instrument_id=bar.instrument_id,
+                                timeframe_id=bar.timeframe_id,
+                                timestamp=bar.timestamp,
+                                open=bar.open,
+                                high=bar.high,
+                                low=bar.low,
+                                close=bar.close,
+                                volume=bar.volume,
+                                spread=bar.spread
+                            )
+                            bars.append(bar_copy)
+
+                    # If we got here, the query succeeded
+                    break
+
+                except Exception as e:
+                    retry_count += 1
+                    error_message = str(e)
+
+                    # Check if this is a deadlock error
+                    if "deadlock" in error_message.lower() and retry_count < max_retries:
+                        # Log the deadlock and retry
+                        self.logger.log_event(
+                            level="WARNING",
+                            message=f"Deadlock detected when fetching bars for {symbol}/{timeframe.name}, retrying ({retry_count}/{max_retries})",
+                            event_type="DATABASE_DEADLOCK",
+                            component="strategy_manager",
+                            action="_on_new_bar",
+                            status="retrying",
+                            details={
+                                "symbol": symbol,
+                                "timeframe": timeframe.name,
+                                "retry": retry_count
+                            }
+                        )
+
+                        # Wait a bit before retrying (exponential backoff)
+                        time.sleep(0.1 * (2 ** retry_count))
+                    else:
+                        # If not a deadlock or max retries reached, re-raise
+                        if retry_count >= max_retries:
+                            self.logger.log_error(
+                                level="ERROR",
+                                message=f"Max retries reached when fetching bars for {symbol}/{timeframe.name}",
+                                exception_type=type(e).__name__,
+                                function="_on_new_bar",
+                                traceback=str(e)[:500],  # Truncate to avoid string truncation error
+                                context={
+                                    "symbol": symbol,
+                                    "timeframe": timeframe.name,
+                                    "retry": retry_count
+                                }
+                            )
+                        raise
+
+            # Sort in ascending order (oldest first)
+            bars.sort(key=lambda x: x.timestamp)
 
             if not bars or len(bars) < 2:  # Need at least 1 completed + 1 forming
                 return
@@ -330,7 +414,7 @@ class StrategyManager:
                         )
                         continue
 
-                    # Call the strategy's on_bar method
+                    # Call the strategy's on_bar method with copied bars
                     signal = strategy.on_bar(timeframe, bars)
 
                     # If a signal was generated, publish it
@@ -354,12 +438,17 @@ class StrategyManager:
                         )
 
                 except Exception as e:
+                    # Truncate error message to prevent string truncation in SQL
+                    error_msg = str(e)
+                    if len(error_msg) > 450:  # Leave some margin below the 500 char SQL limit
+                        error_msg = error_msg[:450] + "..."
+
                     self.logger.log_error(
                         level="ERROR",
-                        message=f"Error processing strategy {strategy_name} for {symbol} on {timeframe.name}: {str(e)}",
+                        message=f"Error processing strategy {strategy_name} for {symbol} on {timeframe.name}: {error_msg}",
                         exception_type=type(e).__name__,
                         function="_on_new_bar",
-                        traceback=str(e),
+                        traceback=str(e)[:450],  # Truncate to avoid string truncation error
                         context={
                             "strategy_name": strategy_name,
                             "symbol": symbol,
@@ -368,12 +457,17 @@ class StrategyManager:
                     )
 
         except Exception as e:
+            # Truncate error message to prevent string truncation in SQL
+            error_msg = str(e)
+            if len(error_msg) > 450:  # Leave some margin below the 500 char SQL limit
+                error_msg = error_msg[:450] + "..."
+
             self.logger.log_error(
                 level="ERROR",
-                message=f"Error handling new bar event: {str(e)}",
+                message=f"Error handling new bar event: {error_msg}",
                 exception_type=type(e).__name__,
                 function="_on_new_bar",
-                traceback=str(e),
+                traceback=str(e)[:450],  # Truncate to avoid string truncation error
                 context={
                     "event_type": "NewBarEvent",
                     "symbol": getattr(event, "symbol", None),

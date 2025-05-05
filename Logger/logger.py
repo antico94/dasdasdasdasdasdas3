@@ -124,16 +124,49 @@ class DBLogger:
     def log_error(self, level: str, message: str, exception_type: str, function: str,
                   traceback: str, context: Dict[str, Any] = None):
         """Log an error with detailed information"""
-        log_method = getattr(self.logger, level.lower(), self.logger.error)
-        log_method(message, extra={
-            'extra': {
-                'entry_type': 'error',
-                'exception_type': exception_type,
-                'function': function,
-                'traceback': traceback,
-                'context': context
-            }
-        })
+        try:
+            # Truncate message, traceback and context if too long to prevent SQL errors
+            max_message_length = 450  # Below SQL field size limit
+            max_traceback_length = 1000  # Adjust based on your database field size
+
+            # Truncate message if needed
+            if len(message) > max_message_length:
+                message = message[:max_message_length] + "..."
+
+            # Truncate traceback if needed
+            if traceback and len(traceback) > max_traceback_length:
+                traceback = traceback[:max_traceback_length] + "..."
+
+            # Truncate context values if needed
+            if context:
+                for key, value in context.items():
+                    if isinstance(value, str) and len(value) > max_message_length:
+                        context[key] = value[:max_message_length] + "..."
+
+            # Convert context to JSON string or None
+            context_json = json.dumps(context) if context else None
+
+            # Check if the resulting JSON string is too long and truncate if needed
+            if context_json and len(context_json) > 4000:  # Adjust based on your database field size
+                context_json = context_json[:4000] + "..."
+
+            # Determine the appropriate log method
+            log_method = getattr(self.logger, level.lower(), self.logger.error)
+
+            # Log the error with truncated values
+            log_method(message, extra={
+                'extra': {
+                    'entry_type': 'error',
+                    'exception_type': exception_type,
+                    'function': function,
+                    'traceback': traceback,
+                    'context': context_json
+                }
+            })
+
+        except Exception as e:
+            # Fallback to simple stderr logging if there's an error in the logging itself
+            sys.stderr.write(f"Error logging error: {str(e)}. Original error: {message}\n")
 
     def log_trade(self, level: str, message: str, symbol: str, operation: str,
                   price: float, volume: float, order_id: Optional[int] = None,

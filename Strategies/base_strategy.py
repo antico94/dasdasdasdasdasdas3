@@ -102,10 +102,34 @@ class BaseStrategy(ABC):
             return None
 
         # Separate the completed bars from the current forming bar
-        completed_bars = bars[:-1]  # All bars except the last one
-        # Note: We're not using the forming bar in calculations, but we keep track of it
-        # for potential logging or debugging purposes
-        forming_bar = bars[-1]  # The last bar is currently forming
+        # IMPORTANT: Create full copies of all bars to avoid session binding issues
+        completed_bars = []
+        for bar in bars[:-1]:  # All bars except the last one
+            completed_bar = PriceBar(
+                instrument_id=bar.instrument_id,
+                timeframe_id=bar.timeframe_id,
+                timestamp=bar.timestamp,
+                open=bar.open,
+                high=bar.high,
+                low=bar.low,
+                close=bar.close,
+                volume=bar.volume,
+                spread=bar.spread
+            )
+            completed_bars.append(completed_bar)
+
+        # Deep copy the forming bar too
+        forming_bar = PriceBar(
+            instrument_id=bars[-1].instrument_id,
+            timeframe_id=bars[-1].timeframe_id,
+            timestamp=bars[-1].timestamp,
+            open=bars[-1].open,
+            high=bars[-1].high,
+            low=bars[-1].low,
+            close=bars[-1].close,
+            volume=bars[-1].volume,
+            spread=bars[-1].spread
+        )
 
         # Get the latest completed candle
         latest_completed_candle = completed_bars[-1]
@@ -353,12 +377,19 @@ class BaseStrategy(ABC):
                 'volume': np.array([])
             }
 
+        # Create arrays directly using data from detached bars
+        open_array = np.array([float(bar.open) for bar in bars])  # Explicitly convert to float
+        high_array = np.array([float(bar.high) for bar in bars])
+        low_array = np.array([float(bar.low) for bar in bars])
+        close_array = np.array([float(bar.close) for bar in bars])
+        volume_array = np.array([float(bar.volume) for bar in bars])
+
         return {
-            'open': np.array([bar.open for bar in bars]),
-            'high': np.array([bar.high for bar in bars]),
-            'low': np.array([bar.low for bar in bars]),
-            'close': np.array([bar.close for bar in bars]),
-            'volume': np.array([bar.volume for bar in bars])
+            'open': open_array,
+            'high': high_array,
+            'low': low_array,
+            'close': close_array,
+            'volume': volume_array
         }
 
     def validate_bars(self, timeframe: TimeFrame, min_bars: int) -> bool:
