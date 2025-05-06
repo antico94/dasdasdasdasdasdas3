@@ -24,7 +24,7 @@ class LoggingConfig:
     component_configs: Dict[str, Dict[str, Any]] = field(default_factory=lambda: {
         'data_fetcher': {
             'enabled_levels': {'WARNING', 'ERROR', 'CRITICAL'},
-            'console_output': True
+            'console_output': False
         },
         'trade_executor': {
             'enabled_levels': {'INFO', 'WARNING', 'ERROR', 'CRITICAL'},

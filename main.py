@@ -13,6 +13,7 @@ import traceback
 from datetime import datetime
 
 from Config.trading_config import ConfigManager
+from Config.logging_config import LoggingConfig
 from Logger.logger import DBLogger
 from startup import TradingBotStartup
 from system_monitor import SystemMonitor
@@ -37,6 +38,19 @@ class TradingBot:
             self.config_manager.load_from_file(config_path)
             print(f"Default configuration created and loaded at {config_path}")
 
+        # Initialize logger with proper configuration
+        self._logger = self._initialize_logger()
+
+        self._startup = TradingBotStartup(self._logger)
+        self._system_monitor = None
+        self._running = False
+        self._stop_event = threading.Event()
+        self._shutdown_complete_event = threading.Event()
+        self._shutdown_in_progress = False
+        self._shutdown_lock = threading.Lock()
+
+    def _initialize_logger(self) -> DBLogger:
+        """Initialize the logger with the configuration"""
         # Create connection string from credentials
         from Config.credentials import (
             SQL_SERVER,
@@ -53,20 +67,55 @@ class TradingBot:
         else:
             conn_string = f"mssql+pyodbc://{SQL_USERNAME}:{SQL_PASSWORD}@{SQL_SERVER}/{SQL_DATABASE}?driver={SQL_DRIVER.replace(' ', '+')}"
 
-        # Initialize logger
-        self._logger = DBLogger(
+        # Create logging config
+        logging_config = LoggingConfig(
             conn_string=conn_string,
+            max_records=10000,
+            console_output=True,
             enabled_levels={'INFO', 'WARNING', 'ERROR', 'CRITICAL'},
-            console_output=True
+            component_configs={
+                'data_fetcher': {
+                    'enabled_levels': {'WARNING', 'ERROR', 'CRITICAL'},
+                    'console_output': False
+                },
+                'mt5_manager': {
+                    'enabled_levels': {'WARNING', 'ERROR', 'CRITICAL'},
+                    'console_output': True
+                },
+                'order_manager': {
+                    'enabled_levels': {'INFO', 'WARNING', 'ERROR', 'CRITICAL'},
+                    'console_output': True
+                },
+                'strategy_manager': {
+                    'enabled_levels': {'WARNING', 'ERROR', 'CRITICAL'},
+                    'console_output': True
+                },
+                'event_bus': {
+                    'enabled_levels': {'WARNING', 'ERROR', 'CRITICAL'},
+                    'console_output': False
+                },
+                'timeframe_manager': {
+                    'enabled_levels': {'WARNING', 'ERROR', 'CRITICAL'},
+                    'console_output': False
+                },
+                'timeframe_scheduler': {
+                    'enabled_levels': {'WARNING', 'ERROR', 'CRITICAL'},
+                    'console_output': False
+                },
+                'system_monitor': {
+                    'enabled_levels': {'INFO', 'WARNING', 'ERROR', 'CRITICAL'},
+                    'console_output': True
+                }
+            }
         )
 
-        self._startup = TradingBotStartup(self._logger)
-        self._system_monitor = None
-        self._running = False
-        self._stop_event = threading.Event()
-        self._shutdown_complete_event = threading.Event()
-        self._shutdown_in_progress = False
-        self._shutdown_lock = threading.Lock()
+        # Initialize logger
+        logger = DBLogger(conn_string=conn_string)
+
+        # Load the configuration
+        logger.load_config(logging_config)
+
+        return logger
 
     def initialize(self) -> bool:
         """Initialize the trading bot"""

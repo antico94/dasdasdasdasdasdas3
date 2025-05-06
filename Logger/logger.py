@@ -24,43 +24,66 @@ class DBLogger:
                 cls._instance._initialized = False
             return cls._instance
 
-    def __init__(self, conn_string: str, enabled_levels: Set[str] = None, console_output: bool = True,
-                 color_scheme: Dict[str, str] = None):
+    def __init__(self, conn_string: str = None, enabled_levels: Set[str] = None, console_output: bool = True,
+                 color_scheme: Dict[str, str] = None, component_name: str = None):
         with self._lock:
-            if self._initialized:
+            # For a component-specific logger, we should already have a base instance initialized
+            if component_name and self._initialized:
                 return
 
-            self.conn_string = conn_string
-            self.enabled_levels = enabled_levels or {'ERROR', 'CRITICAL'}
-            self.console_output = console_output
-            self.color_scheme = color_scheme
-            self.logger = logging.getLogger('trading_bot')
-            self.logger.setLevel(logging.DEBUG)
-            self.logger.propagate = False
+            # If this is a new base instance, we need a connection string
+            if not self._initialized and conn_string is None:
+                raise ValueError("Connection string is required for initial logger setup")
 
-            # Clear existing handlers to avoid duplicates on re-initialization
-            for handler in self.logger.handlers[:]:
-                self.logger.removeHandler(handler)
+            # Initialize base logger if not done yet
+            if not self._initialized:
+                self._initialize_base_logger(conn_string, enabled_levels, console_output, color_scheme)
 
-            # SQL Handler (always enabled)
-            self.sql_handler = SQLAlchemyHandler(conn_string, max_records=10000)
-            self.sql_handler.setLevel(logging.DEBUG)
-            self.logger.addHandler(self.sql_handler)
+    def _initialize_base_logger(self, conn_string, enabled_levels, console_output, color_scheme):
+        """Initialize the base logger with global settings"""
+        self.conn_string = conn_string
+        self.enabled_levels = enabled_levels or {'WARNING', 'ERROR', 'CRITICAL'}
+        self.console_output = console_output
+        self.color_scheme = color_scheme
+        self.config = None  # Will hold the LoggingConfig when loaded
+        self._component_loggers = {}  # Store component-specific loggers
 
-            # Console Handler (conditional)
-            if console_output:
-                self.console_handler = logging.StreamHandler(sys.stdout)
-                self.console_handler.setFormatter(
-                    ColorFormatter('%(asctime)s - %(levelname)s - %(message)s', self.color_scheme))
+        # Create the main logger
+        self.logger = logging.getLogger('trading_bot')
+        self.logger.setLevel(logging.DEBUG)
+        self.logger.propagate = False
 
-                # Set level based on enabled_levels
-                min_level = self._get_min_level()
-                self.console_handler.setLevel(min_level)
-                self.logger.addHandler(self.console_handler)
+        # Clear existing handlers
+        for handler in self.logger.handlers[:]:
+            self.logger.removeHandler(handler)
 
-            self._initialized = True
+        # SQL Handler (always enabled)
+        self.sql_handler = SQLAlchemyHandler(conn_string, max_records=10000)
+        self.sql_handler.setLevel(logging.DEBUG)  # Log everything to database
+        self.logger.addHandler(self.sql_handler)
 
-    def _get_min_level(self) -> int:
+        # Console Handler (conditional)
+        self.console_handler = None
+        if console_output:
+            self._setup_console_handler(self.enabled_levels, self.color_scheme)
+
+        self._initialized = True
+
+    def _setup_console_handler(self, enabled_levels, color_scheme):
+        """Set up console handler with appropriate levels"""
+        if self.console_handler:
+            self.logger.removeHandler(self.console_handler)
+
+        self.console_handler = logging.StreamHandler(sys.stdout)
+        self.console_handler.setFormatter(
+            ColorFormatter('%(asctime)s - %(levelname)s - %(message)s', color_scheme))
+
+        # Set level based on enabled_levels
+        min_level = self._get_min_level(enabled_levels)
+        self.console_handler.setLevel(min_level)
+        self.logger.addHandler(self.console_handler)
+
+    def _get_min_level(self, enabled_levels):
         """Get minimum logging level based on enabled_levels"""
         level_map = {
             'DEBUG': logging.DEBUG,
@@ -70,45 +93,130 @@ class DBLogger:
             'CRITICAL': logging.CRITICAL
         }
 
-        if not self.enabled_levels or 'NONE' in self.enabled_levels:
+        if not enabled_levels or 'NONE' in enabled_levels:
             return logging.CRITICAL + 1  # Higher than any level
 
-        return min(level_map.get(level, logging.CRITICAL) for level in self.enabled_levels)
+        return min(level_map.get(level, logging.CRITICAL) for level in enabled_levels)
 
-    def debug(self, message: str, **kwargs):
+    # Add factory method for component loggers
+    @classmethod
+    def get_component_logger(cls, component_name: str):
+        """Get a logger for a specific component"""
+        if cls._instance is None or not cls._instance._initialized:
+            raise RuntimeError("Base logger must be initialized before creating component loggers")
+
+        # Return a new logger instance with the component name
+        logger = cls(component_name=component_name)
+        return logger
+
+    def load_config(self, config):
+        """Load configuration from LoggingConfig object"""
+        self.config = config
+        self.conn_string = config.conn_string
+        self.enabled_levels = config.enabled_levels
+        self.console_output = config.console_output
+        self.color_scheme = config.color_scheme
+
+        # Update base logger with new settings
+        if self.console_output:
+            self._setup_console_handler(self.enabled_levels, self.color_scheme)
+        elif self.console_handler:
+            self.logger.removeHandler(self.console_handler)
+            self.console_handler = None
+
+        # Update SQL handler with max_records
+        if hasattr(self.sql_handler, 'max_records'):
+            self.sql_handler.max_records = config.max_records
+
+        # Initialize component loggers based on config
+        self._init_component_loggers()
+
+    def _init_component_loggers(self):
+        """Initialize loggers for all components in config"""
+        if not self.config or not hasattr(self.config, 'component_configs'):
+            return
+
+        for component_name, comp_config in self.config.component_configs.items():
+            self._init_component_logger(component_name, comp_config)
+
+    def _init_component_logger(self, component_name, comp_config=None):
+        """Initialize a component-specific logger"""
+        if comp_config is None and self.config and hasattr(self.config, 'component_configs'):
+            comp_config = self.config.component_configs.get(component_name, {})
+        elif comp_config is None:
+            comp_config = {}
+
+        # Get component settings (fallback to base logger settings)
+        comp_console_output = comp_config.get('console_output', self.console_output)
+        comp_enabled_levels = comp_config.get('enabled_levels', self.enabled_levels)
+
+        # Create component logger (child of base logger)
+        component_logger = logging.getLogger(f'trading_bot.{component_name}')
+        component_logger.setLevel(logging.DEBUG)
+        component_logger.propagate = False
+
+        # Clear existing handlers
+        for handler in component_logger.handlers[:]:
+            component_logger.removeHandler(handler)
+
+        # Always add SQL handler
+        component_logger.addHandler(self.sql_handler)
+
+        # Add console handler if enabled for this component
+        if comp_console_output:
+            console_handler = logging.StreamHandler(sys.stdout)
+            console_handler.setFormatter(
+                ColorFormatter('%(asctime)s - %(levelname)s - %(message)s', self.color_scheme))
+            min_level = self._get_min_level(comp_enabled_levels)
+            console_handler.setLevel(min_level)
+            component_logger.addHandler(console_handler)
+
+        # Store the component logger
+        self._component_loggers[component_name] = component_logger
+
+    def get_logger(self, component_name=None):
+        """Get a logger for the specified component or the default logger"""
+        if component_name is None:
+            return self.logger
+
+        # Initialize component logger if not done yet
+        if component_name not in self._component_loggers:
+            self._init_component_logger(component_name)
+
+        return self._component_loggers.get(component_name, self.logger)
+
+    # Core logging methods using the appropriate logger
+    def debug(self, message: str, component: str = None, **kwargs):
         """Log a debug message"""
-        self.logger.debug(message, extra={'extra': kwargs})
+        logger = self.get_logger(component) if component else self.logger
+        logger.debug(message, extra={'extra': kwargs})
 
-    def info(self, message: str, **kwargs):
+    def info(self, message: str, component: str = None, **kwargs):
         """Log an info message"""
-        self.logger.info(message, extra={'extra': kwargs})
+        logger = self.get_logger(component) if component else self.logger
+        logger.info(message, extra={'extra': kwargs})
 
-    def warning(self, message: str, **kwargs):
+    def warning(self, message: str, component: str = None, **kwargs):
         """Log a warning message"""
-        self.logger.warning(message, extra={'extra': kwargs})
+        logger = self.get_logger(component) if component else self.logger
+        logger.warning(message, extra={'extra': kwargs})
 
-    def error(self, message: str, **kwargs):
+    def error(self, message: str, component: str = None, **kwargs):
         """Log an error message"""
-        self.logger.error(message, extra={'extra': kwargs})
+        logger = self.get_logger(component) if component else self.logger
+        logger.error(message, extra={'extra': kwargs})
 
-    def critical(self, message: str, **kwargs):
+    def critical(self, message: str, component: str = None, **kwargs):
         """Log a critical message"""
-        self.logger.critical(message, extra={'extra': kwargs})
+        logger = self.get_logger(component) if component else self.logger
+        logger.critical(message, extra={'extra': kwargs})
 
     def log_event(self, level: str, message: str, event_type: str, component: str,
                   action: str = None, status: str = "success", details: Dict[str, Any] = None):
-        """
-        Log an event with enhanced context, with truncation protection
+        """Log an event with enhanced context, with truncation protection"""
+        # Get the appropriate logger for this component
+        logger = self.get_logger(component)
 
-        Args:
-            level: Log level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
-            message: Main log message
-            event_type: Type of event (SYSTEM_INIT, CONFIG_CHANGE, TRADE_SIGNAL, etc.)
-            component: Component that generated the event
-            action: Specific action that was taken
-            status: Outcome status (success, failure, pending, etc.)
-            details: Additional structured details as a dictionary
-        """
         # Ensure message fits within database field limits (500 chars)
         if len(message) > 450:
             message = message[:447] + "..."
@@ -154,8 +262,8 @@ class DBLogger:
                 # If serialization fails, provide a fallback
                 safe_details = json.dumps({"error": "Could not serialize details"})
 
-        # Call the original logger method with safe parameters
-        log_method = getattr(self.logger, level.lower(), self.logger.info)
+        # Call the logger method with safe parameters
+        log_method = getattr(logger, level.lower(), logger.info)
         log_method(message, extra={
             'extra': {
                 'entry_type': 'event',

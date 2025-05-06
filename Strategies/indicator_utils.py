@@ -1437,12 +1437,13 @@ class IndicatorUtils:
         min_period = max(short_period, medium_period, long_period)
 
         for i in range(min_period, len(prices)):
+            # FIX: Explicitly check each condition separately to avoid array comparison errors
             # Bullish: short > medium > long
-            if short_ma[i] > medium_ma[i] > long_ma[i]:
+            if short_ma[i] > medium_ma[i] and medium_ma[i] > long_ma[i]:
                 bullish_setups[i] = True
 
             # Bearish: short < medium < long
-            if short_ma[i] < medium_ma[i] < long_ma[i]:
+            if short_ma[i] < medium_ma[i] and medium_ma[i] < long_ma[i]:
                 bearish_setups[i] = True
 
         return bullish_setups, bearish_setups

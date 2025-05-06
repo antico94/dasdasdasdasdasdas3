@@ -38,11 +38,7 @@ class DataFetcher:
         self._config = ConfigManager().config
         self._db_session = DatabaseSession(conn_string)
         self._mt5_manager = MT5Manager()
-        self._logger = DBLogger(
-            conn_string=conn_string,
-            enabled_levels={'INFO', 'WARNING', 'ERROR', 'CRITICAL'},
-            console_output=True
-        )
+        self._logger = DBLogger.get_component_logger("data_fetcher")
         self._event_bus = EventBus()
         self._instrument_timeframe_map = {}
         self._running = False
@@ -409,52 +405,82 @@ class DataFetcher:
             )
             return False
 
-    def _convert_to_price_bars(self, mt5_data: List[Dict[str, Any]], instrument_id: int, timeframe_id: int) -> List[
-        PriceBar]:
+    def _convert_to_price_bars(self, mt5_data: List[Dict[str, Any]], instrument_id: int, timeframe_id: int) -> List[PriceBar]:
         """Convert MT5 data to price bars ensuring naive datetime for database compatibility"""
         bars = []
         for rate in mt5_data:
-            # Check if rate is a numpy structured array or a dict
-            if hasattr(rate, 'dtype') and hasattr(rate, '__getitem__'):
-                # Convert from numpy array to datetime
-                # First create with timezone info for consistency
-                timestamp_tz = datetime.fromtimestamp(float(rate[0]), tz=timezone.utc)
-                # Then strip timezone for database storage
-                timestamp = timestamp_tz.replace(tzinfo=None)
-
-                bar = PriceBar(
-                    instrument_id=int(instrument_id),
-                    timeframe_id=int(timeframe_id),
-                    timestamp=timestamp,  # Naive datetime for database
-                    open=float(rate[1]),
-                    high=float(rate[2]),
-                    low=float(rate[3]),
-                    close=float(rate[4]),
-                    volume=float(rate[5]),
-                    spread=float(rate[6]) if len(rate) > 6 else None
-                )
-            else:
-                # Convert from dict
-                if isinstance(rate["time"], datetime):
-                    # Save as naive datetime for database
-                    timestamp = rate["time"].replace(tzinfo=None) if rate["time"].tzinfo else rate["time"]
-                else:
-                    # Convert timestamp to datetime, then strip timezone
-                    timestamp_tz = datetime.fromtimestamp(rate["time"], tz=timezone.utc)
+            try:
+                # Check if rate is a numpy structured array or a dict
+                if hasattr(rate, 'dtype') and hasattr(rate, '__getitem__'):
+                    # Convert from numpy array to datetime
+                    # First create with timezone info for consistency
+                    timestamp_tz = datetime.fromtimestamp(float(rate[0]), tz=timezone.utc)
+                    # Then strip timezone for database storage
                     timestamp = timestamp_tz.replace(tzinfo=None)
 
-                bar = PriceBar(
-                    instrument_id=int(instrument_id),
-                    timeframe_id=int(timeframe_id),
-                    timestamp=timestamp,  # Naive datetime for database
-                    open=float(rate["open"]),
-                    high=float(rate["high"]),
-                    low=float(rate["low"]),
-                    close=float(rate["close"]),
-                    volume=float(rate["tick_volume"]),
-                    spread=float(rate["spread"]) if "spread" in rate else None
+                    # Extract volume data properly
+                    volume_value = float(rate[5]) if len(rate) > 5 else 0.0
+
+                    bar = PriceBar(
+                        instrument_id=int(instrument_id),
+                        timeframe_id=int(timeframe_id),
+                        timestamp=timestamp,  # Naive datetime for database
+                        open=float(rate[1]),
+                        high=float(rate[2]),
+                        low=float(rate[3]),
+                        close=float(rate[4]),
+                        volume=volume_value,
+                        spread=float(rate[6]) if len(rate) > 6 else None
+                    )
+                else:
+                    # Convert from dict
+                    if isinstance(rate["time"], datetime):
+                        # Save as naive datetime for database
+                        timestamp = rate["time"].replace(tzinfo=None) if rate["time"].tzinfo else rate["time"]
+                    else:
+                        # Convert timestamp to datetime, then strip timezone
+                        timestamp_tz = datetime.fromtimestamp(rate["time"], tz=timezone.utc)
+                        timestamp = timestamp_tz.replace(tzinfo=None)
+
+                    # Get volume from the appropriate field
+                    if "volume" in rate:
+                        volume_value = float(rate["volume"])
+                    elif "tick_volume" in rate:
+                        volume_value = float(rate["tick_volume"])
+                    elif "real_volume" in rate:
+                        volume_value = float(rate["real_volume"])
+                    else:
+                        volume_value = 0.0
+                        self._logger.log_event(
+                            level="WARNING",
+                            message=f"No volume data found in MT5 response for {instrument_id}/{timeframe_id}",
+                            event_type="DATA_CONVERSION",
+                            component="data_fetcher",
+                            action="_convert_to_price_bars",
+                            status="missing_volume"
+                        )
+
+                    bar = PriceBar(
+                        instrument_id=int(instrument_id),
+                        timeframe_id=int(timeframe_id),
+                        timestamp=timestamp,  # Naive datetime for database
+                        open=float(rate["open"]),
+                        high=float(rate["high"]),
+                        low=float(rate["low"]),
+                        close=float(rate["close"]),
+                        volume=volume_value,
+                        spread=float(rate["spread"]) if "spread" in rate else None
+                    )
+                bars.append(bar)
+            except Exception as e:
+                self._logger.log_error(
+                    level="ERROR",
+                    message=f"Error converting MT5 data to PriceBar: {str(e)}",
+                    exception_type=type(e).__name__,
+                    function="_convert_to_price_bars",
+                    traceback=str(e),
+                    context={"instrument_id": instrument_id, "timeframe_id": timeframe_id}
                 )
-            bars.append(bar)
         return bars
 
     def start(self) -> bool:

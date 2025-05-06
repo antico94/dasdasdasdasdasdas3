@@ -152,12 +152,31 @@ class ScalpingStrategy(BaseStrategy):
 
         # Calculate volume indicators if needed
         if self.require_volume_confirmation:
+            # Make sure we're properly calculating the average volume
             avg_volume = IndicatorUtils.average_volume(arrays['volume'], 20)
+
+            # Calculate volume spike - ensure we're using the correct parameters
             volume_spike = IndicatorUtils.volume_spike(
                 arrays['volume'], 20, self.volume_threshold
             )
+
+            # Store both indicators
             self.set_indicator(timeframe, 'avg_volume', avg_volume)
             self.set_indicator(timeframe, 'volume_spike', volume_spike)
+
+            # Log to help with debugging
+            self.log_strategy_event(
+                level="DEBUG",
+                message=f"Volume spike calculated for {self.symbol} on {timeframe.name}",
+                action="update_indicators",
+                status="calculated",
+                details={
+                    "volume_threshold": self.volume_threshold,
+                    "current_volume": float(arrays['volume'][-1]) if len(arrays['volume']) > 0 else 0,
+                    "avg_volume": float(avg_volume[-1]) if len(avg_volume) > 0 else 0,
+                    "spike_detected": bool(volume_spike[-1]) if len(volume_spike) > 0 else False
+                }
+            )
 
         # Calculate MACD crossovers
         macd_crosses_above = np.zeros(len(macd_line), dtype=bool)
@@ -228,12 +247,45 @@ class ScalpingStrategy(BaseStrategy):
         if self.require_volume_confirmation:
             volume_spike = self.get_indicator(timeframe, 'volume_spike')
 
+            # Add debug logging for volume indicators
+            avg_volume = self.get_indicator(timeframe, 'avg_volume')
+            self.log_strategy_event(
+                level="DEBUG",
+                message=f"Volume indicator status for {self.symbol} on {timeframe.name}",
+                action="calculate_signals",
+                status="checking",
+                details={
+                    "volume_spike_available": volume_spike is not None,
+                    "avg_volume_available": avg_volume is not None,
+                    "require_volume_confirmation": self.require_volume_confirmation,
+                    "volume_threshold": self.volume_threshold
+                }
+            )
+
         # Ensure we have all necessary indicators
         if (macd_line is None or macd_signal is None or macd_histogram is None or
                 macd_crosses_above is None or macd_crosses_below is None or
                 rsi is None or ma is None or atr is None or
                 (self.require_volume_confirmation and volume_spike is None) or
                 any(v is None for v in ema_indicators.values())):
+            self.log_strategy_event(
+                level="WARNING",
+                message=f"Missing indicators for {self.symbol} on {timeframe.name}",
+                action="calculate_signals",
+                status="missing_indicators",
+                details={
+                    "macd_line": macd_line is not None,
+                    "macd_signal": macd_signal is not None,
+                    "macd_histogram": macd_histogram is not None,
+                    "macd_crosses_above": macd_crosses_above is not None,
+                    "macd_crosses_below": macd_crosses_below is not None,
+                    "rsi": rsi is not None,
+                    "ma": ma is not None,
+                    "atr": atr is not None,
+                    "volume_spike": volume_spike is not None if self.require_volume_confirmation else "Not Required",
+                    "ema_indicators": {k: v is not None for k, v in ema_indicators.items()}
+                }
+            )
             return None
 
         # Get short, medium, and long EMAs
@@ -242,8 +294,8 @@ class ScalpingStrategy(BaseStrategy):
         long_ema = None if len(self.ema_values) < 3 else ema_indicators[self.ema_values[2]]
 
         # Calculate conditions
-        fresh_macd_cross_above = bool(macd_crosses_above[-1])
-        fresh_macd_cross_below = bool(macd_crosses_below[-1])
+        fresh_bullish_cross = bool(macd_crosses_above[-1])
+        fresh_bearish_cross = bool(macd_crosses_below[-1])
 
         macd_above_signal = macd_line[-1] > macd_signal[-1]
         macd_below_signal = macd_line[-1] < macd_signal[-1]
@@ -254,7 +306,13 @@ class ScalpingStrategy(BaseStrategy):
         price_above_ma = current_bar.close > ma[-1]
         price_below_ma = current_bar.close < ma[-1]
 
-        volume_confirmed = not self.require_volume_confirmation or (volume_spike is not None and volume_spike[-1])
+        # Properly check volume spike
+        if self.require_volume_confirmation and volume_spike is not None and len(volume_spike) > 0:
+            volume_confirmed = bool(volume_spike[-1])
+            volume_status = f"Volume spike detected: {volume_confirmed}"
+        else:
+            volume_confirmed = not self.require_volume_confirmation
+            volume_status = "Not required" if not self.require_volume_confirmation else "Volume spike data missing"
 
         # EMA alignment
         ema_bullish = short_ema[-1] > medium_ema[-1]
@@ -266,7 +324,7 @@ class ScalpingStrategy(BaseStrategy):
         # Prepare condition groups for display
         condition_groups = {
             "Bullish Scalping Conditions": [
-                ("MACD crossed above Signal", fresh_macd_cross_above,
+                ("MACD crossed above Signal", fresh_bullish_cross,
                  f"Cross detected at index [-1]"),
 
                 ("MACD above Signal", macd_above_signal,
@@ -283,7 +341,7 @@ class ScalpingStrategy(BaseStrategy):
                  f"{long_ema[-1] if long_ema is not None else 'N/A'}"),
 
                 ("Volume Confirmation", volume_confirmed,
-                 f"Volume spike detected" if volume_confirmed else "Not required or not detected"),
+                 volume_status),
 
                 ("Spread Below Max",
                  current_bar.spread <= self.max_spread_pips if hasattr(current_bar, 'spread') else True,
@@ -291,7 +349,7 @@ class ScalpingStrategy(BaseStrategy):
             ],
 
             "Bearish Scalping Conditions": [
-                ("MACD crossed below Signal", fresh_macd_cross_below,
+                ("MACD crossed below Signal", fresh_bearish_cross,
                  f"Cross detected at index [-1]"),
 
                 ("MACD below Signal", macd_below_signal,
@@ -308,7 +366,7 @@ class ScalpingStrategy(BaseStrategy):
                  f"{long_ema[-1] if long_ema is not None else 'N/A'}"),
 
                 ("Volume Confirmation", volume_confirmed,
-                 f"Volume spike detected" if volume_confirmed else "Not required or not detected"),
+                 volume_status),
 
                 ("Spread Below Max",
                  current_bar.spread <= self.max_spread_pips if hasattr(current_bar, 'spread') else True,
@@ -320,7 +378,7 @@ class ScalpingStrategy(BaseStrategy):
         self.print_strategy_conditions(timeframe, condition_groups)
 
         # Check for bullish scalping signal
-        if (fresh_macd_cross_above and ema_bullish and
+        if (fresh_bullish_cross and ema_bullish and
                 above_long_ema and volume_confirmed and
                 self.last_signal_type[timeframe] != "BUY"):
 
@@ -342,7 +400,8 @@ class ScalpingStrategy(BaseStrategy):
                     "price": current_bar.close,
                     "short_ema": short_ema[-1],
                     "medium_ema": medium_ema[-1],
-                    "long_ema": long_ema[-1] if long_ema is not None else None
+                    "long_ema": long_ema[-1] if long_ema is not None else None,
+                    "volume_confirmed": volume_confirmed
                 }
             )
 
@@ -360,7 +419,7 @@ class ScalpingStrategy(BaseStrategy):
             )
 
         # Check for bearish scalping signal
-        elif (fresh_macd_cross_below and ema_bearish and
+        elif (fresh_bearish_cross and ema_bearish and
               below_long_ema and volume_confirmed and
               self.last_signal_type[timeframe] != "SELL"):
 
@@ -382,7 +441,8 @@ class ScalpingStrategy(BaseStrategy):
                     "price": current_bar.close,
                     "short_ema": short_ema[-1],
                     "medium_ema": medium_ema[-1],
-                    "long_ema": long_ema[-1] if long_ema is not None else None
+                    "long_ema": long_ema[-1] if long_ema is not None else None,
+                    "volume_confirmed": volume_confirmed
                 }
             )
 
