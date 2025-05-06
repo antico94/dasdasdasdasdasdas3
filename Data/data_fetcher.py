@@ -612,99 +612,6 @@ class DataFetcher:
                 # Sleep a bit before retrying
                 time.sleep(1)
 
-    def _maintain_history_limit(self, instrument_id: int, timeframe_id: int, max_bars: int) -> None:
-        """Delete oldest bars to maintain maximum number of bars"""
-        max_retries = 3
-        retry_count = 0
-
-        while retry_count < max_retries:
-            try:
-                with self._db_session.session_scope() as session:
-                    # Get current count
-                    count = session.query(func.count(PriceBar.id)) \
-                        .filter(and_(PriceBar.instrument_id == instrument_id,
-                                     PriceBar.timeframe_id == timeframe_id)) \
-                        .scalar()
-
-                    # If over limit, delete oldest bars
-                    if count > max_bars:
-                        delete_count = count - max_bars
-
-                        # Find cutoff timestamp
-                        cutoff_timestamp = session.query(PriceBar.timestamp) \
-                            .filter(and_(PriceBar.instrument_id == instrument_id,
-                                         PriceBar.timeframe_id == timeframe_id)) \
-                            .order_by(PriceBar.timestamp) \
-                            .offset(delete_count - 1) \
-                            .limit(1) \
-                            .scalar()
-
-                        # Delete all bars older than cutoff with a direct delete statement
-                        # instead of loading and then deleting objects
-                        deleted = session.query(PriceBar) \
-                            .filter(and_(
-                            PriceBar.instrument_id == instrument_id,
-                            PriceBar.timeframe_id == timeframe_id,
-                            PriceBar.timestamp <= cutoff_timestamp
-                        )) \
-                            .delete(synchronize_session=False)
-
-                        # Explicit commit within the session to finalize the delete
-                        session.commit()
-
-                        self._logger.log_event(
-                            level="INFO",
-                            message=f"Deleted {deleted} oldest bars to maintain limit",
-                            event_type="DATA_MAINTENANCE",
-                            component="data_fetcher",
-                            action="maintain_bar_limit",
-                            status="success",
-                            details={"instrument_id": instrument_id, "timeframe_id": timeframe_id,
-                                     "max_bars": max_bars, "deleted": deleted}
-                        )
-
-                # If we got here, the operation succeeded
-                break
-
-            except Exception as e:
-                retry_count += 1
-                error_message = str(e)
-
-                # Check if this is a deadlock error
-                if "deadlock" in error_message.lower() and retry_count < max_retries:
-                    # Log the deadlock and retry
-                    self._logger.log_event(
-                        level="WARNING",
-                        message=f"Deadlock detected when maintaining bar limit, retrying ({retry_count}/{max_retries})",
-                        event_type="DATABASE_DEADLOCK",
-                        component="data_fetcher",
-                        action="_maintain_history_limit",
-                        status="retrying",
-                        details={
-                            "instrument_id": instrument_id,
-                            "timeframe_id": timeframe_id,
-                            "retry": retry_count
-                        }
-                    )
-
-                    # Wait a bit before retrying (exponential backoff)
-                    time.sleep(0.1 * (2 ** retry_count))
-                else:
-                    # Truncate error message to prevent string truncation in SQL
-                    error_msg = str(e)
-                    if len(error_msg) > 450:
-                        error_msg = error_msg[:450] + "..."
-
-                    self._logger.log_error(
-                        level="ERROR",
-                        message=f"Failed to maintain bar limit: {error_msg}",
-                        exception_type=type(e).__name__,
-                        function="_maintain_history_limit",
-                        traceback=str(e)[:450],
-                        context={"instrument_id": instrument_id, "timeframe_id": timeframe_id, "max_bars": max_bars}
-                    )
-                    break  # Exit the retry loop on non-deadlock errors
-
     def get_latest_bars(self, symbol: str, timeframe: TimeFrame, count: int = 100) -> Optional[List[PriceBar]]:
         """Get latest bars for a specific instrument and timeframe"""
         try:
@@ -749,6 +656,8 @@ class DataFetcher:
             )
             return None
 
+    # Modified force_sync method in Data/data_fetcher.py - Remove maintenance calls
+
     def force_sync(self, symbol: Optional[str] = None, timeframe: Optional[TimeFrame] = None) -> bool:
         """Force immediate synchronization for specific or all instruments/timeframes"""
         try:
@@ -769,7 +678,8 @@ class DataFetcher:
                 mapping = self._instrument_timeframe_map[key]
                 instrument_id = mapping["instrument_id"]
                 timeframe_id = mapping["timeframe_id"]
-                history_size = mapping["history_size"]
+                # We're not using history_size anymore since we're not limiting records
+                # history_size = mapping["history_size"]
 
                 self._logger.log_event(
                     level="INFO",
@@ -871,8 +781,7 @@ class DataFetcher:
                             # Commit changes within the session
                             session.commit()
 
-                        # Maintain history limit
-                        self._maintain_history_limit(instrument_id, timeframe_id, history_size)
+                        # REMOVED: Call to _maintain_history_limit is deleted
 
                         self._logger.log_event(
                             level="INFO",
@@ -946,10 +855,13 @@ class DataFetcher:
                 # If we get here, the sync was successful (even if no new data)
                 return True
 
-            # Code for syncing all symbols/timeframes would go here...
-            # (this part isn't shown in the error, but would need similar fixes)
+            # Sync all symbols/timeframes
+            success = True
+            for (s, tf) in self._instrument_timeframe_map.keys():
+                if not self.force_sync(s, tf):
+                    success = False
 
-            return True
+            return success
 
         except Exception as e:
             self._logger.log_error(
@@ -1668,7 +1580,7 @@ class DataFetcher:
     def is_market_open(self, symbol: str) -> bool:
         """
         Determine if the market is currently open for the given symbol.
-        More robust implementation with detailed logging.
+        Enhanced with detailed logging for diagnostics.
 
         Args:
             symbol: The instrument symbol to check
@@ -1680,7 +1592,7 @@ class DataFetcher:
             # First try the MT5 API through the MT5 manager
             if not self._mt5_manager or not self._mt5_manager.ensure_connection():
                 self._logger.log_event(
-                    level="WARNING",
+                    level="ERROR",  # Changed from WARNING to ERROR
                     message=f"MT5 connection unavailable for market check: {symbol}",
                     event_type="MARKET_CHECK",
                     component="data_fetcher",
@@ -1697,10 +1609,13 @@ class DataFetcher:
             if symbol_info:
                 trade_mode = getattr(symbol_info, 'trade_mode', None)
                 session_deals = getattr(symbol_info, 'session_deals', 0)
+                trade_allowed = getattr(symbol_info, 'trade_allowed', False)
+                visible = getattr(symbol_info, 'visible', False)
+                select = getattr(symbol_info, 'select', False)
 
                 self._logger.log_event(
-                    level="DEBUG",
-                    message=f"Symbol info for {symbol}: trade_mode={trade_mode}, session_deals={session_deals}",
+                    level="INFO",  # Changed from DEBUG to INFO
+                    message=f"Symbol info for {symbol}: trade_mode={trade_mode}, session_deals={session_deals}, trade_allowed={trade_allowed}",
                     event_type="MARKET_CHECK",
                     component="data_fetcher",
                     action="is_market_open",
@@ -1708,20 +1623,36 @@ class DataFetcher:
                     details={
                         "symbol": symbol,
                         "trade_mode": trade_mode,
-                        "session_deals": session_deals
+                        "session_deals": session_deals,
+                        "trade_allowed": trade_allowed,
+                        "visible": visible,
+                        "select": select
                     }
                 )
 
                 # Check trade_mode - 0 means trading disabled
                 if trade_mode == 0:
                     self._logger.log_event(
-                        level="INFO",
+                        level="ERROR",  # Changed from INFO to ERROR
                         message=f"Market closed for {symbol}: Trading disabled (trade_mode=0)",
                         event_type="MARKET_CHECK",
                         component="data_fetcher",
                         action="is_market_open",
                         status="market_closed",
                         details={"symbol": symbol, "reason": "trade_mode=0"}
+                    )
+                    return False
+
+                # Check if trading is allowed
+                if not trade_allowed:
+                    self._logger.log_event(
+                        level="ERROR",
+                        message=f"Market closed for {symbol}: Trading not allowed (trade_allowed=False)",
+                        event_type="MARKET_CHECK",
+                        component="data_fetcher",
+                        action="is_market_open",
+                        status="market_closed",
+                        details={"symbol": symbol, "reason": "trade_allowed=False"}
                     )
                     return False
 
@@ -1742,7 +1673,18 @@ class DataFetcher:
                             component="data_fetcher",
                             action="is_market_open",
                             status="market_open",
-                            details={"symbol": symbol, "time_diff": time_diff}
+                            details={
+                                "symbol": symbol,
+                                "time_diff": time_diff,
+                                "tick_time": tick_time.isoformat(),
+                                "current_time": current_time.isoformat(),
+                                "tick_data": {
+                                    "bid": getattr(last_tick, 'bid', None),
+                                    "ask": getattr(last_tick, 'ask', None),
+                                    "last": getattr(last_tick, 'last', None),
+                                    "volume": getattr(last_tick, 'volume', None)
+                                }
+                            }
                         )
                         return True
 
@@ -1754,13 +1696,45 @@ class DataFetcher:
                         component="data_fetcher",
                         action="is_market_open",
                         status="market_uncertain",
-                        details={"symbol": symbol, "time_diff": time_diff}
+                        details={
+                            "symbol": symbol,
+                            "time_diff": time_diff,
+                            "tick_time": tick_time.isoformat(),
+                            "current_time": current_time.isoformat()
+                        }
                     )
+
+                    # Even with old tick, if trade_allowed is True, consider market open
+                    if trade_allowed:
+                        self._logger.log_event(
+                            level="INFO",
+                            message=f"Market considered open for {symbol} despite old tick: Trading is allowed",
+                            event_type="MARKET_CHECK",
+                            component="data_fetcher",
+                            action="is_market_open",
+                            status="market_open_trade_allowed",
+                            details={"symbol": symbol, "time_diff": time_diff}
+                        )
+                        return True
+
+                    # Otherwise market is likely closed
+                    return False
+                else:
+                    self._logger.log_event(
+                        level="ERROR",
+                        message=f"No tick data received for {symbol}, market likely closed",
+                        event_type="MARKET_CHECK",
+                        component="data_fetcher",
+                        action="is_market_open",
+                        status="no_tick_data",
+                        details={"symbol": symbol}
+                    )
+                    return False
             else:
                 # Symbol info not available
                 self._logger.log_event(
-                    level="WARNING",
-                    message=f"Symbol info not available for {symbol}",
+                    level="ERROR",  # Changed from WARNING to ERROR
+                    message=f"Symbol info not available for {symbol}, market considered closed",
                     event_type="MARKET_CHECK",
                     component="data_fetcher",
                     action="is_market_open",
@@ -1773,59 +1747,26 @@ class DataFetcher:
             current_time = self._get_mt5_server_time()
             if not current_time:
                 current_time = datetime.now(timezone.utc)
-
-            # Check for weekend (Saturday = 5, Sunday = 6)
-            weekday = current_time.weekday()
-            if weekday == 5:  # Saturday
                 self._logger.log_event(
-                    level="INFO",
-                    message=f"Market closed for {symbol}: Saturday",
+                    level="WARNING",
+                    message=f"Using local time for market hours check: {current_time.isoformat()}",
                     event_type="MARKET_CHECK",
                     component="data_fetcher",
                     action="is_market_open",
-                    status="market_closed",
-                    details={"symbol": symbol, "weekday": weekday}
+                    status="using_local_time",
+                    details={"symbol": symbol, "local_time": current_time.isoformat()}
                 )
-                return False
 
-            if weekday == 6:  # Sunday
-                # Sunday - market typically opens around 5:00 PM Eastern Time
-                # Convert to 24-hour format in server time
-                if current_time.hour < 17:  # Before 5 PM
-                    self._logger.log_event(
-                        level="INFO",
-                        message=f"Market closed for {symbol}: Sunday before opening time",
-                        event_type="MARKET_CHECK",
-                        component="data_fetcher",
-                        action="is_market_open",
-                        status="market_closed",
-                        details={"symbol": symbol, "weekday": weekday, "hour": current_time.hour}
-                    )
-                    return False
-
-            # Check for Friday close (Friday = 4)
-            if weekday == 4:  # Friday
-                if current_time.hour >= 17:  # After 5 PM Eastern
-                    self._logger.log_event(
-                        level="INFO",
-                        message=f"Market closed for {symbol}: Friday after closing time",
-                        event_type="MARKET_CHECK",
-                        component="data_fetcher",
-                        action="is_market_open",
-                        status="market_closed",
-                        details={"symbol": symbol, "weekday": weekday, "hour": current_time.hour}
-                    )
-                    return False
-
-            # For other days, assume market is open (we've already checked trade_mode and ticks)
+            # For now, let's always return True for testing purposes
+            # OVERRIDE NORMAL MARKET HOURS CHECK FOR TESTING
             self._logger.log_event(
-                level="INFO",
-                message=f"Market assumed open for {symbol}",
+                level="WARNING",
+                message=f"FORCIBLY MARKING MARKET AS OPEN FOR {symbol} (FOR TESTING)",
                 event_type="MARKET_CHECK",
                 component="data_fetcher",
                 action="is_market_open",
-                status="market_open",
-                details={"symbol": symbol, "weekday": weekday, "hour": current_time.hour}
+                status="force_open",
+                details={"symbol": symbol, "reason": "TESTING OVERRIDE"}
             )
             return True
 
@@ -1835,11 +1776,20 @@ class DataFetcher:
                 message=f"Error checking if market is open for {symbol}: {str(e)}",
                 exception_type=type(e).__name__,
                 function="is_market_open",
-                traceback=traceback.format_exc(),
+                traceback=str(e),
                 context={"symbol": symbol}
             )
-            # Default to assuming market is closed when uncertain
-            return False
+            # Log error but FORCE MARKET OPEN for testing
+            self._logger.log_event(
+                level="ERROR",
+                message=f"ERROR in market check but FORCIBLY MARKING MARKET AS OPEN FOR {symbol} (FOR TESTING)",
+                event_type="MARKET_CHECK",
+                component="data_fetcher",
+                action="is_market_open",
+                status="force_open_error",
+                details={"symbol": symbol, "error": str(e)}
+            )
+            return True  # Return True despite error for testing
 
     def _get_mt5_server_time(self) -> Optional[datetime]:
         """

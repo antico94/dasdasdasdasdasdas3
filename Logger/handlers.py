@@ -156,17 +156,12 @@ class SQLAlchemyHandler(logging.Handler):
             sys.stderr.write(f"Error logging trade entry: {str(e)}\n")
 
     def _enforce_record_limits(self):
-        """Delete oldest records when limit is reached for all log tables"""
-        try:
-            tables = ['Events', 'Errors', 'Trades']
-
-            with self.db_session.session_scope() as session:
-                for table_name in tables:
-                    self._enforce_table_limit(session, table_name)
-
-        except SQLAlchemyError as e:
-            # Log to stderr as a fallback
-            sys.stderr.write(f"Error enforcing record limits: {str(e)}\n")
+        """
+        This method is now a no-op. Previously it deleted oldest records when limit was reached.
+        Record limits are no longer enforced to prevent deadlocks.
+        """
+        # No operation - we're keeping all records indefinitely
+        pass
 
     def _enforce_table_limit(self, session, table_name):
         """Delete oldest records for a specific table when limit is reached"""

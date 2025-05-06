@@ -218,6 +218,7 @@ class TimeframeManager:
     def check_timeframe_ready(self, strategy_name: str, timeframe: TimeFrame) -> bool:
         """
         Check if all dependent timeframes for a strategy have been updated.
+        Enhanced with additional logging.
 
         Args:
             strategy_name: Name of the strategy
@@ -230,24 +231,29 @@ class TimeframeManager:
             # If strategy or timeframe not registered, assume it's not ready
             if strategy_name not in self.timeframe_dependencies:
                 self.logger.log_event(
-                    level="WARNING",
+                    level="ERROR",  # Changed from WARNING to ERROR
                     message=f"Strategy {strategy_name} not registered in TimeframeManager",
                     event_type="TIMEFRAME_MANAGER",
                     component="timeframe_manager",
                     action="check_timeframe_ready",
-                    status="not_registered"
+                    status="not_registered",
+                    details={"registered_strategies": list(self.timeframe_dependencies.keys())}
                 )
                 return False
 
             if timeframe not in self.timeframe_dependencies[strategy_name]:
                 self.logger.log_event(
-                    level="WARNING",
+                    level="ERROR",  # Changed from WARNING to ERROR
                     message=f"Timeframe {timeframe.name} not registered for strategy {strategy_name}",
                     event_type="TIMEFRAME_MANAGER",
                     component="timeframe_manager",
                     action="check_timeframe_ready",
                     status="not_registered",
-                    details={"strategy_name": strategy_name, "timeframe": timeframe.name}
+                    details={
+                        "strategy_name": strategy_name,
+                        "timeframe": timeframe.name,
+                        "registered_timeframes": [tf.name for tf in self.timeframe_dependencies[strategy_name].keys()]
+                    }
                 )
                 return False
 
@@ -259,6 +265,7 @@ class TimeframeManager:
                 return True
 
             # Check if all dependencies have been updated
+            missing_deps = []
             for dep_timeframe in dependencies:
                 # Get the last update times
                 primary_update_time = self.last_update_time.get((strategy_name, timeframe))
@@ -267,19 +274,26 @@ class TimeframeManager:
                 # If either is missing, not ready
                 if primary_update_time is None:
                     self.logger.log_event(
-                        level="DEBUG",
+                        level="INFO",  # Changed from DEBUG to INFO
                         message=f"Primary timeframe {timeframe.name} not yet updated for {strategy_name}",
                         event_type="TIMEFRAME_MANAGER",
                         component="timeframe_manager",
                         action="check_timeframe_ready",
                         status="not_ready",
-                        details={"strategy_name": strategy_name, "timeframe": timeframe.name}
+                        details={
+                            "strategy_name": strategy_name,
+                            "timeframe": timeframe.name,
+                            "dependency_timeframes": [tf.name for tf in dependencies],
+                            "update_times": {k[1].name: str(v) for k, v in self.last_update_time.items() if
+                                             k[0] == strategy_name}
+                        }
                     )
                     return False
 
                 if dep_update_time is None:
+                    missing_deps.append(dep_timeframe.name)
                     self.logger.log_event(
-                        level="DEBUG",
+                        level="INFO",  # Changed from DEBUG to INFO
                         message=f"Dependency {dep_timeframe.name} not yet updated for {strategy_name}",
                         event_type="TIMEFRAME_MANAGER",
                         component="timeframe_manager",
@@ -288,15 +302,17 @@ class TimeframeManager:
                         details={
                             "strategy_name": strategy_name,
                             "timeframe": timeframe.name,
-                            "dependency": dep_timeframe.name
+                            "dependency": dep_timeframe.name,
+                            "primary_update_time": str(primary_update_time)
                         }
                     )
-                    return False
+                    continue  # Continue checking other dependencies
 
                 # Dependent timeframe must be newer or equal to primary
                 if dep_update_time < primary_update_time:
+                    missing_deps.append(dep_timeframe.name)
                     self.logger.log_event(
-                        level="DEBUG",
+                        level="INFO",  # Changed from DEBUG to INFO
                         message=f"Dependency {dep_timeframe.name} is older than primary {timeframe.name} for {strategy_name}",
                         event_type="TIMEFRAME_MANAGER",
                         component="timeframe_manager",
@@ -310,17 +326,25 @@ class TimeframeManager:
                             "dependency_time": str(dep_update_time)
                         }
                     )
-                    return False
+
+            # If any dependencies are missing or outdated, return false
+            if missing_deps:
+                return False
 
             # All dependencies are up to date
             self.logger.log_event(
-                level="DEBUG",
+                level="INFO",  # Changed from DEBUG to INFO
                 message=f"All dependencies are up to date for {strategy_name} on {timeframe.name}",
                 event_type="TIMEFRAME_MANAGER",
                 component="timeframe_manager",
                 action="check_timeframe_ready",
                 status="ready",
-                details={"strategy_name": strategy_name, "timeframe": timeframe.name}
+                details={
+                    "strategy_name": strategy_name,
+                    "timeframe": timeframe.name,
+                    "dependencies": [tf.name for tf in dependencies],
+                    "update_time": str(self.last_update_time.get((strategy_name, timeframe)))
+                }
             )
             return True
 

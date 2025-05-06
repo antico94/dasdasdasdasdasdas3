@@ -16,103 +16,96 @@ class OrderManager:
     and advanced position management.
     """
 
-    def __init__(self, mt5_manager=None, logger: DBLogger = None, event_bus=None):
+    def __init__(self, mt5_manager: MT5Manager, logger: DBLogger, event_bus: EventBus):
         """
         Initialize the order manager.
 
         Args:
-            mt5_manager: MT5 manager for order execution
+            mt5_manager: MT5 manager instance
             logger: Logger instance
-            event_bus: Event bus for publishing order events
+            event_bus: Event bus instance
         """
-        # Get connection string from credentials
-        from Config.credentials import (
-            SQL_SERVER,
-            SQL_DATABASE,
-            SQL_DRIVER,
-            USE_WINDOWS_AUTH,
-            SQL_USERNAME,
-            SQL_PASSWORD
-        )
+        self.mt5_manager = mt5_manager
+        self.logger = logger
+        self.event_bus = event_bus
 
-        # Create connection string
-        if USE_WINDOWS_AUTH:
-            conn_string = f"DRIVER={{{SQL_DRIVER}}};SERVER={SQL_SERVER};DATABASE={SQL_DATABASE};Trusted_Connection=yes;"
-        else:
-            conn_string = f"DRIVER={{{SQL_DRIVER}}};SERVER={SQL_SERVER};DATABASE={SQL_DATABASE};UID={SQL_USERNAME};PWD={SQL_PASSWORD}"
+        # Risk management settings
+        self.base_risk_percent = 2.0  # Risk 2% of account per trade
+        self.max_daily_risk_percent = 6.0  # Maximum 6% risk per day
+        self.max_positions_per_symbol = 1  # Maximum positions per symbol
 
-        self.mt5_manager = mt5_manager or MT5Manager()
-        self.logger = logger or DBLogger(
-            conn_string=conn_string,
-            enabled_levels={'INFO', 'WARNING', 'ERROR', 'CRITICAL'},
-            console_output=True
-        )
-        self.event_bus = event_bus or EventBus()
-        self.config = ConfigManager().config
+        # Position tracking
+        self.open_positions = {}  # {symbol: [position_data]}
+        self.daily_risk_used = 0.0  # Risk used today
 
-        # Risk management parameters
-        self.base_risk_percent = 1.0  # Base risk per trade (%)
-        self.max_daily_risk_percent = 3.0  # Maximum daily risk (%)
-        self.max_positions_per_symbol = 2  # Maximum positions per symbol
-
-        # Track open positions
-        self.open_positions = {}  # {ticket: position_info}
-
-        # Track recent trade performance
-        self.recent_trades = []  # Last 10 trades results
-        self.max_recent_trades = 10
-
-        # Thread lock for order operations
+        # Lock for thread safety
         self.lock = threading.RLock()
 
-        # Subscribe to events
+        # Subscribe to signal events
         self.event_bus.subscribe(SignalEvent, self._on_signal)
 
         self.logger.log_event(
             level="INFO",
-            message="Order Manager initialized",
+            message="OrderManager subscribed to signal events",
             event_type="ORDER_MANAGER",
             component="order_manager",
-            action="initialize",
-            status="success",
-            details={"base_risk": f"{self.base_risk_percent}%", "max_daily_risk": f"{self.max_daily_risk_percent}%"}
+            action="__init__",
+            status="subscribed"
         )
 
-    def _on_signal(self, event: SignalEvent) -> None:
+        # Initialize position tracking
+        self._update_position_tracking()
+
+        self.logger.log_event(
+            level="INFO",
+            message="Order Manager initialized",
+            event_type="ORDER_MANAGER_INIT",
+            component="order_manager",
+            action="__init__",
+            status="success",
+            details={
+                "base_risk_percent": self.base_risk_percent,
+                "max_daily_risk_percent": self.max_daily_risk_percent,
+                "max_positions_per_symbol": self.max_positions_per_symbol
+            }
+        )
+
+    def _on_signal(self, event: SignalEvent):
         """
-        Handle incoming signal events.
+        Handle signal events from strategies.
 
         Args:
-            event: The signal event
+            event: Signal event with trade information
         """
         try:
-            # Log the signal receipt
             self.logger.log_event(
                 level="INFO",
-                message=f"Received {event.direction} signal for {event.symbol} from {event.strategy_name}",
-                event_type="SIGNAL_RECEIVED",
+                message=f"Received {event.direction} signal for {event.symbol} on {event.timeframe_name}",
+                event_type="ORDER_SIGNAL",
                 component="order_manager",
                 action="_on_signal",
                 status="received",
                 details={
                     "symbol": event.symbol,
                     "direction": event.direction,
+                    "timeframe": event.timeframe_name,
                     "strategy": event.strategy_name,
-                    "reason": event.reason,
-                    "timestamp": str(event.timestamp)
+                    "reason": event.reason
                 }
             )
 
-            # Process the signal
-            if event.direction in ["BUY", "SELL"]:
-                self._process_entry_signal(event)
+            # Different actions based on signal direction
+            if event.direction == "BUY":
+                self._place_buy_order(event)
+            elif event.direction == "SELL":
+                self._place_sell_order(event)
             elif event.direction == "CLOSE":
-                self._process_close_signal(event)
+                self._close_positions(event)
             else:
                 self.logger.log_event(
-                    level="WARNING",
+                    level="ERROR",
                     message=f"Unknown signal direction: {event.direction}",
-                    event_type="SIGNAL_ERROR",
+                    event_type="ORDER_SIGNAL",
                     component="order_manager",
                     action="_on_signal",
                     status="invalid_direction",
@@ -122,15 +115,18 @@ class OrderManager:
         except Exception as e:
             self.logger.log_error(
                 level="ERROR",
-                message=f"Error processing signal: {str(e)}",
+                message=f"Error handling signal event: {str(e)}",
                 exception_type=type(e).__name__,
                 function="_on_signal",
                 traceback=str(e),
-                context={"signal_type": event.direction, "symbol": event.symbol}
+                context={
+                    "symbol": event.symbol,
+                    "direction": event.direction,
+                    "timeframe": event.timeframe_name,
+                    "strategy": event.strategy_name
+                }
             )
 
-    # execution/order_manager.py - _process_entry_signal method
-    # execution/order_manager.py - _process_entry_signal method
     def _process_entry_signal(self, signal: SignalEvent) -> None:
         """
         Process an entry (BUY/SELL) signal with enhanced error logging.
@@ -718,125 +714,6 @@ class OrderManager:
             )
             return 0.5  # Default to half of base risk
 
-    def _calculate_position_size(self, signal: SignalEvent, risk_percent: float) -> tuple:
-        """
-        Calculate position size based on risk percentage.
-
-        Args:
-            signal: The trading signal
-            risk_percent: Risk percentage to use
-
-        Returns:
-            tuple: (position_size, stop_loss_price)
-        """
-        try:
-            # Get account info
-            account_info = self.mt5_manager.get_account_info()
-
-            if not account_info or 'balance' not in account_info or account_info['balance'] <= 0:
-                return 0, 0
-
-            balance = account_info['balance']
-
-            # Get current price if entry price not specified
-            current_price = signal.entry_price
-            if current_price is None or current_price <= 0:
-                # Get latest price from MT5
-                symbol_info = self.mt5_manager.get_symbol_info(signal.symbol)
-                if symbol_info and hasattr(symbol_info, 'bid') and hasattr(symbol_info, 'ask'):
-                    if signal.direction == "BUY":
-                        current_price = symbol_info.ask
-                    else:
-                        current_price = symbol_info.bid
-                else:
-                    return 0, 0
-
-            # Calculate stop loss if not provided
-            stop_loss = signal.stop_loss
-            if stop_loss is None or stop_loss <= 0:
-                # Use ATR if available in signal (assume it's in the same field that holds the entry price)
-                atr_value = getattr(signal, 'atr', None)
-
-                if atr_value:
-                    # Use ATR-based stop
-                    if signal.direction == "BUY":
-                        stop_loss = current_price - (atr_value * 1.5)
-                    else:
-                        stop_loss = current_price + (atr_value * 1.5)
-                else:
-                    # Default to 1% stop
-                    if signal.direction == "BUY":
-                        stop_loss = current_price * 0.99
-                    else:
-                        stop_loss = current_price * 1.01
-
-            # Calculate risk amount
-            risk_amount = balance * (risk_percent / 100)
-
-            # Calculate pip value (would be more complex in a real system)
-            # Assume standard lot = 100,000 units
-            lot_size = 100000
-
-            # For XAUUSD (Gold), 1 pip is 0.01, for most forex pairs 1 pip is 0.0001
-            pip_size = 0.01 if signal.symbol == "XAUUSD" else 0.0001
-
-            # Calculate position size in lots
-            if signal.direction == "BUY":
-                pips_at_risk = abs(current_price - stop_loss) / pip_size
-            else:
-                pips_at_risk = abs(stop_loss - current_price) / pip_size
-
-            # Avoid division by zero
-            if pips_at_risk <= 0:
-                return 0, stop_loss
-
-            # Calculate position size in lots
-            position_size = risk_amount / (pips_at_risk * pip_size * lot_size)
-
-            # Get symbol info for min/max lot size
-            symbol_info = self.mt5_manager.get_symbol_info(signal.symbol)
-            if symbol_info:
-                min_lot = getattr(symbol_info, 'volume_min', 0.01)
-                max_lot = getattr(symbol_info, 'volume_max', 100.0)
-                lot_step = getattr(symbol_info, 'volume_step', 0.01)
-
-                # Round to lot step
-                position_size = round(position_size / lot_step) * lot_step
-
-                # Ensure within bounds
-                position_size = max(min_lot, min(position_size, max_lot))
-
-            self.logger.log_event(
-                level="INFO",
-                message=f"Calculated position size: {position_size} lots with stop at {stop_loss}",
-                event_type="POSITION_CALCULATION",
-                component="order_manager",
-                action="_calculate_position_size",
-                status="success",
-                details={
-                    "symbol": signal.symbol,
-                    "direction": signal.direction,
-                    "risk_percent": risk_percent,
-                    "position_size": position_size,
-                    "entry_price": current_price,
-                    "stop_loss": stop_loss,
-                    "risk_amount": risk_amount
-                }
-            )
-
-            return position_size, stop_loss
-
-        except Exception as e:
-            self.logger.log_error(
-                level="ERROR",
-                message=f"Error calculating position size: {str(e)}",
-                exception_type=type(e).__name__,
-                function="_calculate_position_size",
-                traceback=str(e),
-                context={"signal_type": signal.direction, "symbol": signal.symbol}
-            )
-            return 0, 0
-
     def _calculate_take_profits(self, signal: SignalEvent, stop_loss: float) -> List[float]:
         """
         Calculate take-profit levels based on risk-reward ratios.
@@ -1406,4 +1283,416 @@ class OrderManager:
                 function="_process_close_signal",
                 traceback=str(e),
                 context={"symbol": signal.symbol}
+            )
+
+    def _place_buy_order(self, event: SignalEvent):
+        """Place a buy order based on signal"""
+        # Update position tracking first
+        self._update_position_tracking()
+
+        # Check if we can place more orders for this symbol
+        symbol_positions = self.open_positions.get(event.symbol, [])
+        if len(symbol_positions) >= self.max_positions_per_symbol:
+            self.logger.log_event(
+                level="WARNING",
+                message=f"Maximum positions reached for {event.symbol}, skipping BUY signal",
+                event_type="ORDER_LIMIT",
+                component="order_manager",
+                action="_place_buy_order",
+                status="max_positions",
+                details={
+                    "symbol": event.symbol,
+                    "current_positions": len(symbol_positions),
+                    "max_positions": self.max_positions_per_symbol
+                }
+            )
+            return
+
+        # Calculate lot size based on risk management
+        lot_size = self._calculate_position_size(event.symbol, event.entry_price, event.stop_loss)
+
+        # Place buy order
+        result = self.mt5_manager.place_order(
+            symbol=event.symbol,
+            order_type=0,  # BUY
+            volume=lot_size,
+            price=0.0,  # Market price (0.0 for market orders)
+            sl=event.stop_loss,
+            tp=event.take_profit,
+            comment=f"{event.strategy_name}_{event.timeframe_name}"
+        )
+
+        if result.get('result', False):
+            self.logger.log_trade(
+                level="INFO",
+                message=f"BUY order placed for {event.symbol} at market price",
+                symbol=event.symbol,
+                operation="BUY",
+                price=result.get('price', event.entry_price),
+                volume=lot_size,
+                order_id=result.get('order'),
+                strategy=event.strategy_name
+            )
+
+            # Update position tracking after order
+            self._update_position_tracking()
+
+            # Publish order event
+            order_event = OrderEvent(
+                instrument_id=event.instrument_id,
+                symbol=event.symbol,
+                order_type="MARKET",
+                direction="BUY",
+                price=result.get('price', event.entry_price),
+                volume=lot_size,
+                order_id=result.get('order'),
+                stop_loss=event.stop_loss,
+                take_profit=event.take_profit,
+                strategy_name=event.strategy_name
+            )
+            self.event_bus.publish(order_event)
+        else:
+            self.logger.log_error(
+                level="ERROR",
+                message=f"Failed to place BUY order: {result.get('error', 'Unknown error')}",
+                exception_type="OrderError",
+                function="_place_buy_order",
+                traceback="",
+                context={
+                    "symbol": event.symbol,
+                    "price": event.entry_price,
+                    "volume": lot_size,
+                    "error": result.get('error')
+                }
+            )
+
+    def _place_sell_order(self, event: SignalEvent):
+        """Place a sell order based on signal"""
+        # Update position tracking first
+        self._update_position_tracking()
+
+        # Check if we can place more orders for this symbol
+        symbol_positions = self.open_positions.get(event.symbol, [])
+        if len(symbol_positions) >= self.max_positions_per_symbol:
+            self.logger.log_event(
+                level="WARNING",
+                message=f"Maximum positions reached for {event.symbol}, skipping SELL signal",
+                event_type="ORDER_LIMIT",
+                component="order_manager",
+                action="_place_sell_order",
+                status="max_positions",
+                details={
+                    "symbol": event.symbol,
+                    "current_positions": len(symbol_positions),
+                    "max_positions": self.max_positions_per_symbol
+                }
+            )
+            return
+
+        # Calculate lot size based on risk management
+        lot_size = self._calculate_position_size(event.symbol, event.entry_price, event.stop_loss)
+
+        # Place sell order
+        result = self.mt5_manager.place_order(
+            symbol=event.symbol,
+            order_type=1,  # SELL
+            volume=lot_size,
+            price=0.0,  # Market price (0.0 for market orders)
+            sl=event.stop_loss,
+            tp=event.take_profit,
+            comment=f"{event.strategy_name}_{event.timeframe_name}"
+        )
+
+        if result.get('result', False):
+            self.logger.log_trade(
+                level="INFO",
+                message=f"SELL order placed for {event.symbol} at market price",
+                symbol=event.symbol,
+                operation="SELL",
+                price=result.get('price', event.entry_price),
+                volume=lot_size,
+                order_id=result.get('order'),
+                strategy=event.strategy_name
+            )
+
+            # Update position tracking after order
+            self._update_position_tracking()
+
+            # Publish order event
+            order_event = OrderEvent(
+                instrument_id=event.instrument_id,
+                symbol=event.symbol,
+                order_type="MARKET",
+                direction="SELL",
+                price=result.get('price', event.entry_price),
+                volume=lot_size,
+                order_id=result.get('order'),
+                stop_loss=event.stop_loss,
+                take_profit=event.take_profit,
+                strategy_name=event.strategy_name
+            )
+            self.event_bus.publish(order_event)
+        else:
+            self.logger.log_error(
+                level="ERROR",
+                message=f"Failed to place SELL order: {result.get('error', 'Unknown error')}",
+                exception_type="OrderError",
+                function="_place_sell_order",
+                traceback="",
+                context={
+                    "symbol": event.symbol,
+                    "price": event.entry_price,
+                    "volume": lot_size,
+                    "error": result.get('error')
+                }
+            )
+
+    def _close_positions(self, event: SignalEvent):
+        """Close positions based on signal"""
+        # Update position tracking first
+        self._update_position_tracking()
+
+        # Get positions for the symbol
+        positions = self.open_positions.get(event.symbol, [])
+        if not positions:
+            self.logger.log_event(
+                level="INFO",
+                message=f"No positions to close for {event.symbol}",
+                event_type="ORDER_CLOSE",
+                component="order_manager",
+                action="_close_positions",
+                status="no_positions",
+                details={"symbol": event.symbol, "strategy": event.strategy_name}
+            )
+            return
+
+        positions_closed = 0
+
+        for position in positions:
+            # Only close positions from the same strategy
+            if event.strategy_name in position.get('comment', ''):
+                result = self.mt5_manager.close_position(position['ticket'])
+
+                if result.get('result', False):
+                    positions_closed += 1
+                    self.logger.log_trade(
+                        level="INFO",
+                        message=f"Closed position #{position['ticket']} for {event.symbol}, profit: {result.get('profit', 0)}",
+                        symbol=event.symbol,
+                        operation="CLOSE",
+                        price=result.get('close_price', 0),
+                        volume=result.get('close_volume', 0),
+                        order_id=position['ticket'],
+                        strategy=event.strategy_name
+                    )
+
+                    # Publish order event
+                    order_event = OrderEvent(
+                        instrument_id=event.instrument_id,
+                        symbol=event.symbol,
+                        order_type="CLOSE",
+                        direction="CLOSE",
+                        price=result.get('close_price', 0),
+                        volume=result.get('close_volume', 0),
+                        order_id=position['ticket'],
+                        strategy_name=event.strategy_name
+                    )
+                    self.event_bus.publish(order_event)
+                else:
+                    self.logger.log_error(
+                        level="ERROR",
+                        message=f"Failed to close position: {result.get('error', 'Unknown error')}",
+                        exception_type="OrderError",
+                        function="_close_positions",
+                        traceback="",
+                        context={
+                            "symbol": event.symbol,
+                            "ticket": position['ticket'],
+                            "error": result.get('error')
+                        }
+                    )
+
+        if positions_closed > 0:
+            # Update position tracking after closing
+            self._update_position_tracking()
+
+            self.logger.log_event(
+                level="INFO",
+                message=f"Closed {positions_closed} positions for {event.symbol}",
+                event_type="ORDER_CLOSE",
+                component="order_manager",
+                action="_close_positions",
+                status="success",
+                details={"symbol": event.symbol, "positions_closed": positions_closed}
+            )
+
+    def _calculate_position_size(self, symbol: str, entry_price: float, stop_loss: float) -> float:
+        """
+        Calculate position size based on risk management settings.
+
+        Args:
+            symbol: Trading symbol
+            entry_price: Entry price
+            stop_loss: Stop loss price
+
+        Returns:
+            Position size in lots
+        """
+        try:
+            # Get account info
+            account_info = self.mt5_manager.get_account_info()
+
+            if not account_info:
+                self.logger.log_error(
+                    level="ERROR",
+                    message="Failed to get account info for position sizing",
+                    exception_type="AccountInfoError",
+                    function="_calculate_position_size",
+                    traceback="",
+                    context={"symbol": symbol}
+                )
+                return 0.01  # Default to minimum position size
+
+            # Extract account balance
+            balance = account_info.get('balance', 0)
+
+            # Calculate risk amount based on percentage
+            risk_amount = balance * (self.base_risk_percent / 100)
+
+            # Calculate stop loss in pips
+            pip_size = 0.0001  # Default for most forex pairs
+
+            # Adjust pip size for JPY pairs and Gold
+            if symbol.endswith('JPY'):
+                pip_size = 0.01
+            elif symbol == 'XAUUSD':
+                pip_size = 0.01
+
+            # Calculate stop loss distance
+            if stop_loss is None or entry_price is None or entry_price == 0 or stop_loss == 0:
+                # If no stop loss, use default risk (0.01 lots)
+                self.logger.log_event(
+                    level="WARNING",
+                    message=f"Missing entry or stop loss price for {symbol}, using default lot size",
+                    event_type="POSITION_SIZING",
+                    component="order_manager",
+                    action="_calculate_position_size",
+                    status="default_size",
+                    details={
+                        "symbol": symbol,
+                        "entry_price": entry_price,
+                        "stop_loss": stop_loss
+                    }
+                )
+                return 0.01
+
+            stop_distance = abs(entry_price - stop_loss)
+            stop_pips = stop_distance / pip_size
+
+            # Safety check for very small stop distance
+            if stop_pips < 5:
+                self.logger.log_event(
+                    level="WARNING",
+                    message=f"Stop loss too close ({stop_pips} pips) for {symbol}, using minimum 5 pips",
+                    event_type="POSITION_SIZING",
+                    component="order_manager",
+                    action="_calculate_position_size",
+                    status="minimum_stop",
+                    details={
+                        "symbol": symbol,
+                        "entry_price": entry_price,
+                        "stop_loss": stop_loss,
+                        "stop_pips": stop_pips
+                    }
+                )
+                stop_pips = 5
+
+            # Calculate position size in lots
+            lot_value_per_pip = 10  # Standard lot value per pip in USD ($10 per pip for 1.0 lot)
+
+            # Adjust for Gold which has different pip value
+            if symbol == 'XAUUSD':
+                lot_value_per_pip = 100  # Gold has $100 per pip for 1.0 lot
+
+            max_risk_per_pip = risk_amount / stop_pips
+            lot_size = max_risk_per_pip / lot_value_per_pip
+
+            # Round to 2 decimal places (0.01 lot precision)
+            lot_size = round(lot_size, 2)
+
+            # Apply minimum and maximum position size limits
+            lot_size = max(0.01, min(lot_size, 10.0))
+
+            self.logger.log_event(
+                level="INFO",
+                message=f"Calculated position size: {lot_size} lots for {symbol}",
+                event_type="POSITION_SIZING",
+                component="order_manager",
+                action="_calculate_position_size",
+                status="calculated",
+                details={
+                    "symbol": symbol,
+                    "balance": balance,
+                    "risk_percent": self.base_risk_percent,
+                    "risk_amount": risk_amount,
+                    "stop_pips": stop_pips,
+                    "lot_size": lot_size
+                }
+            )
+
+            return lot_size
+
+        except Exception as e:
+            self.logger.log_error(
+                level="ERROR",
+                message=f"Error calculating position size: {str(e)}",
+                exception_type=type(e).__name__,
+                function="_calculate_position_size",
+                traceback=str(e),
+                context={"symbol": symbol}
+            )
+            return 0.01  # Default to minimum position size on error
+
+    def _update_position_tracking(self):
+        """Update open positions tracking"""
+        try:
+            with self.lock:
+                # Get current positions from MT5
+                positions = self.mt5_manager.get_positions()
+
+                # Reset tracking
+                self.open_positions = {}
+
+                # Update tracking dictionary
+                for position in positions:
+                    symbol = position.get('symbol')
+                    if symbol not in self.open_positions:
+                        self.open_positions[symbol] = []
+
+                    self.open_positions[symbol].append(position)
+
+                # Log position count
+                total_positions = sum(len(pos_list) for pos_list in self.open_positions.values())
+
+                self.logger.log_event(
+                    level="INFO",
+                    message=f"Trading activity: {total_positions} open positions",
+                    event_type="POSITION_UPDATE",
+                    component="order_manager",
+                    action="_update_position_tracking",
+                    status="success",
+                    details={
+                        "total_positions": total_positions,
+                        "positions_by_symbol": {symbol: len(pos_list) for symbol, pos_list in
+                                                self.open_positions.items()}
+                    }
+                )
+        except Exception as e:
+            self.logger.log_error(
+                level="ERROR",
+                message=f"Error updating position tracking: {str(e)}",
+                exception_type=type(e).__name__,
+                function="_update_position_tracking",
+                traceback=str(e),
+                context={}
             )
