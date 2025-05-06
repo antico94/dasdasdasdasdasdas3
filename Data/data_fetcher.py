@@ -5,7 +5,7 @@ import time
 import traceback
 
 from sqlalchemy import and_, desc, func
-
+import MetaTrader5 as mt5
 from Config.trading_config import ConfigManager, TimeFrame
 from Database.db_session import DatabaseSession
 from Database.models import PriceBar, Instrument, Timeframe as DbTimeframe
@@ -409,38 +409,44 @@ class DataFetcher:
             )
             return False
 
-    def _convert_to_price_bars(self, mt5_data: List[Dict[str, Any]], instrument_id: int, timeframe_id: int) -> List[PriceBar]:
-        """Convert MT5 data to price bars using UTC timestamps"""
+    def _convert_to_price_bars(self, mt5_data: List[Dict[str, Any]], instrument_id: int, timeframe_id: int) -> List[
+        PriceBar]:
+        """Convert MT5 data to price bars ensuring naive datetime for database compatibility"""
         bars = []
         for rate in mt5_data:
             # Check if rate is a numpy structured array or a dict
             if hasattr(rate, 'dtype') and hasattr(rate, '__getitem__'):
-                # Convert from numpy array - use fromtimestamp with UTC
-                timestamp = datetime.fromtimestamp(float(rate[0]), tz=timezone.utc).replace(tzinfo=None)
-                bar = PriceBar(
-                    instrument_id=int(instrument_id),
-                    timeframe_id=int(timeframe_id),
-                    timestamp=timestamp,  # UTC timestamp
-                    open=float(rate[1]),  # open
-                    high=float(rate[2]),  # high
-                    low=float(rate[3]),  # low
-                    close=float(rate[4]),  # close
-                    volume=float(rate[5]),  # tick_volume
-                    spread=float(rate[6]) if len(rate) > 6 else None  # spread
-                )
-            else:
-                # Convert from dict
-                if isinstance(rate["time"], datetime):
-                    # If already a datetime, ensure it's treated as UTC
-                    timestamp = rate["time"].replace(tzinfo=timezone.utc).replace(tzinfo=None)
-                else:
-                    # Otherwise assume timestamp is UTC
-                    timestamp = datetime.fromtimestamp(rate["time"], tz=timezone.utc).replace(tzinfo=None)
+                # Convert from numpy array to datetime
+                # First create with timezone info for consistency
+                timestamp_tz = datetime.fromtimestamp(float(rate[0]), tz=timezone.utc)
+                # Then strip timezone for database storage
+                timestamp = timestamp_tz.replace(tzinfo=None)
 
                 bar = PriceBar(
                     instrument_id=int(instrument_id),
                     timeframe_id=int(timeframe_id),
-                    timestamp=timestamp,
+                    timestamp=timestamp,  # Naive datetime for database
+                    open=float(rate[1]),
+                    high=float(rate[2]),
+                    low=float(rate[3]),
+                    close=float(rate[4]),
+                    volume=float(rate[5]),
+                    spread=float(rate[6]) if len(rate) > 6 else None
+                )
+            else:
+                # Convert from dict
+                if isinstance(rate["time"], datetime):
+                    # Save as naive datetime for database
+                    timestamp = rate["time"].replace(tzinfo=None) if rate["time"].tzinfo else rate["time"]
+                else:
+                    # Convert timestamp to datetime, then strip timezone
+                    timestamp_tz = datetime.fromtimestamp(rate["time"], tz=timezone.utc)
+                    timestamp = timestamp_tz.replace(tzinfo=None)
+
+                bar = PriceBar(
+                    instrument_id=int(instrument_id),
+                    timeframe_id=int(timeframe_id),
+                    timestamp=timestamp,  # Naive datetime for database
                     open=float(rate["open"]),
                     high=float(rate["high"]),
                     low=float(rate["low"]),
@@ -1149,24 +1155,56 @@ class DataFetcher:
             return False
 
     def _update_last_processed_timestamp(self, symbol: str, timeframe: TimeFrame, timestamp: datetime) -> None:
-        """Update the last processed timestamp for a symbol/timeframe"""
+        """
+        Update the last processed timestamp for a symbol/timeframe.
+        Stores timestamp in memory with timezone info for consistency in comparisons.
+
+        Args:
+            symbol: The symbol
+            timeframe: The timeframe
+            timestamp: The timestamp with or without timezone info
+        """
         key = (symbol, timeframe)
-        self._last_processed_timestamps[key] = timestamp
+
+        # Ensure timestamp has timezone info for internal tracking
+        if timestamp.tzinfo is None:
+            timestamp_with_tz = timestamp.replace(tzinfo=timezone.utc)
+        else:
+            timestamp_with_tz = timestamp
+
+        # Store with timezone info
+        self._last_processed_timestamps[key] = timestamp_with_tz
 
         self._logger.log_event(
             level="INFO",
-            message=f"Updated last processed timestamp for {symbol}/{timeframe.name}: {timestamp.isoformat()}",
+            message=f"Updated last processed timestamp for {symbol}/{timeframe.name}: {timestamp_with_tz.isoformat()}",
             event_type="DATA_SYNC",
             component="data_fetcher",
             action="_update_last_processed_timestamp",
             status="success",
-            details={"symbol": symbol, "timeframe": timeframe.name, "timestamp": timestamp.isoformat()}
+            details={"symbol": symbol, "timeframe": timeframe.name, "timestamp": timestamp_with_tz.isoformat()}
         )
 
     def _get_last_processed_timestamp(self, symbol: str, timeframe: TimeFrame) -> Optional[datetime]:
-        """Get the last processed timestamp for a symbol/timeframe"""
+        """
+        Get the last processed timestamp for a symbol/timeframe.
+        Returns timestamp with timezone info for consistent comparisons.
+
+        Args:
+            symbol: The symbol
+            timeframe: The timeframe
+
+        Returns:
+            Timestamp with timezone info or None if not set
+        """
         key = (symbol, timeframe)
-        return self._last_processed_timestamps.get(key)
+        timestamp = self._last_processed_timestamps.get(key)
+
+        # If we have a timestamp, ensure it has timezone info
+        if timestamp is not None and timestamp.tzinfo is None:
+            return timestamp.replace(tzinfo=timezone.utc)
+
+        return timestamp
 
     def _check_and_sync_timeframes(self) -> None:
         """
@@ -1206,7 +1244,8 @@ class DataFetcher:
                     action="_check_and_sync_timeframes",
                     status="fallback"
                 )
-                mt5_server_time = datetime.now(timezone.utc).replace(tzinfo=None)
+                # Use current time but ensure it has timezone info
+                mt5_server_time = datetime.now(timezone.utc)
 
             # Process timeframes in order: M1 first, then higher timeframes
             timeframe_minutes = [1, 5, 15, 30, 60, 240, 1440, 10080, 43200]  # M1 to MN1
@@ -1266,8 +1305,6 @@ class DataFetcher:
                 context={}
             )
 
-    # Data/data_fetcher.py - modified _sync_timeframe method
-
     def _sync_timeframe(self, symbol: str, timeframe: TimeFrame, current_time: datetime) -> bool:
         """
         Sync a specific timeframe and return whether a new bar was detected.
@@ -1307,15 +1344,32 @@ class DataFetcher:
             if not completed_bars:
                 return False
 
-            # Get the timestamp of the latest completed bar - MAKE A COPY to avoid session binding issues
+            # Get the timestamp of the latest completed bar
             if isinstance(completed_bars[-1]["time"], datetime):
                 latest_completed_timestamp = completed_bars[-1]["time"]
             else:
-                latest_completed_timestamp = datetime.fromtimestamp(completed_bars[-1]["time"],
-                                                                    tz=timezone.utc).replace(tzinfo=None)
+                latest_completed_timestamp = datetime.fromtimestamp(completed_bars[-1]["time"], tz=timezone.utc)
+
+            # Strip timezone info for database comparisons since SQL Server doesn't handle timezone objects properly
+            if latest_completed_timestamp.tzinfo is not None:
+                latest_completed_timestamp_naive = latest_completed_timestamp.replace(tzinfo=None)
+            else:
+                latest_completed_timestamp_naive = latest_completed_timestamp
 
             # If this is the first time we're processing this timeframe or we have a new bar
-            new_bar_detected = last_processed is None or latest_completed_timestamp > last_processed
+            new_bar_detected = False
+
+            if last_processed is None:
+                new_bar_detected = True
+            else:
+                # Convert last_processed to naive for consistent comparison
+                if last_processed.tzinfo is not None:
+                    last_processed_naive = last_processed.replace(tzinfo=None)
+                else:
+                    last_processed_naive = last_processed
+
+                # Compare timestamps without timezone info
+                new_bar_detected = latest_completed_timestamp_naive > last_processed_naive
 
             if new_bar_detected:
                 # We have a new completed bar - let's process it
@@ -1345,15 +1399,24 @@ class DataFetcher:
                     with self._db_session.session_scope() as session:
                         for bar in bars:
                             # Check if this is newer than the last processed timestamp
-                            if last_processed and bar.timestamp <= last_processed:
-                                continue  # Skip bars we've already processed
+                            if last_processed:
+                                # Convert both to naive datetime for comparison
+                                bar_ts_naive = bar.timestamp.replace(
+                                    tzinfo=None) if bar.timestamp.tzinfo else bar.timestamp
+                                last_proc_naive = last_processed.replace(
+                                    tzinfo=None) if last_processed.tzinfo else last_processed
 
-                            # Check if bar already exists - CRITICAL FIX - QUERY EACH TIME INSIDE SESSION
+                                # Skip bars we've already processed
+                                if bar_ts_naive <= last_proc_naive:
+                                    continue
+
+                            # Check if bar already exists - QUERY EACH TIME INSIDE SESSION
                             existing = session.query(PriceBar).filter(
                                 and_(
                                     PriceBar.instrument_id == bar.instrument_id,
                                     PriceBar.timeframe_id == bar.timeframe_id,
-                                    PriceBar.timestamp == bar.timestamp
+                                    PriceBar.timestamp == bar.timestamp.replace(tzinfo=None)
+                                    # Strip timezone info for SQL Server
                                 )
                             ).first()
 
@@ -1370,7 +1433,8 @@ class DataFetcher:
                                         and_(
                                             PriceBar.instrument_id == bar.instrument_id,
                                             PriceBar.timeframe_id == bar.timeframe_id,
-                                            PriceBar.timestamp == bar.timestamp
+                                            PriceBar.timestamp == bar.timestamp.replace(tzinfo=None)
+                                            # Strip timezone info
                                         )
                                     ).update({
                                         "open": bar.open,
@@ -1382,7 +1446,9 @@ class DataFetcher:
                                     })
                                     updated_count += 1
                             else:
-                                # Add new record
+                                # Add new record - ensuring the timestamp is timezone-naive for the database
+                                bar.timestamp = bar.timestamp.replace(
+                                    tzinfo=None) if bar.timestamp.tzinfo else bar.timestamp
                                 session.add(bar)
                                 inserted_count += 1
 
@@ -1408,7 +1474,7 @@ class DataFetcher:
                             }
                         )
 
-                    # Update the last processed timestamp
+                    # Update the last processed timestamp - store with timezone info for internal comparisons
                     self._update_last_processed_timestamp(symbol, timeframe, latest_completed_timestamp)
 
                     # Publish events for new bars
@@ -1416,11 +1482,16 @@ class DataFetcher:
                     # to avoid using detached objects
                     with self._db_session.session_scope() as session:
                         if last_processed:
+                            # Convert to naive for SQL Server comparison
+                            last_processed_naive = last_processed.replace(
+                                tzinfo=None) if last_processed.tzinfo else last_processed
+
+                            # Use standard timestamp comparison without timezone function
                             new_bars = session.query(PriceBar).filter(
                                 and_(
                                     PriceBar.instrument_id == instrument_id,
                                     PriceBar.timeframe_id == timeframe_id,
-                                    PriceBar.timestamp > last_processed
+                                    PriceBar.timestamp > last_processed_naive
                                 )
                             ).order_by(PriceBar.timestamp).all()
                         else:
@@ -1437,7 +1508,7 @@ class DataFetcher:
                             bar_copy = PriceBar(
                                 instrument_id=bar.instrument_id,
                                 timeframe_id=bar.timeframe_id,
-                                timestamp=bar.timestamp,
+                                timestamp=bar.timestamp,  # Keep as naive datetime from database
                                 open=bar.open,
                                 high=bar.high,
                                 low=bar.low,
@@ -1474,7 +1545,7 @@ class DataFetcher:
 
         Args:
             symbol: The symbol to check
-            current_time: The current MT5 server time
+            current_time: The current MT5 server time (with timezone info)
         """
         try:
             # Define timeframes in ascending order of minutes
@@ -1498,9 +1569,19 @@ class DataFetcher:
 
                 # Check if the current time indicates a potential timeframe close
                 # For example, if it's exactly on the hour, an H1 bar may have closed
-                minute = current_time.minute
-                hour = current_time.hour
-                day = current_time.day
+
+                # Ensure we're working with a naive datetime for minute/hour extraction
+                # but keep a copy of the timezone info
+                if current_time.tzinfo is not None:
+                    naive_current_time = current_time.replace(tzinfo=None)
+                    timezone_info = current_time.tzinfo
+                else:
+                    naive_current_time = current_time
+                    timezone_info = None
+
+                minute = naive_current_time.minute
+                hour = naive_current_time.hour
+                day = naive_current_time.day
 
                 should_check = False
 
@@ -1531,8 +1612,14 @@ class DataFetcher:
                 # Other timeframes (W1, MN1) are more complex and may need additional logic
 
                 if should_check:
+                    # Restore timezone info for the sync operation
+                    if timezone_info is not None:
+                        check_time = naive_current_time.replace(tzinfo=timezone_info)
+                    else:
+                        check_time = naive_current_time
+
                     # This timeframe may have a new completed bar, synchronize it
-                    self._sync_timeframe(symbol, matching_timeframe, current_time)
+                    self._sync_timeframe(symbol, matching_timeframe, check_time)
 
         except Exception as e:
             self._logger.log_error(
@@ -1543,43 +1630,6 @@ class DataFetcher:
                 traceback=traceback.format_exc(),
                 context={"symbol": symbol}
             )
-
-    def _get_mt5_server_time(self) -> Optional[datetime]:
-        """
-        Get the current MT5 server time with proper error handling.
-
-        Returns:
-            datetime: The current MT5 server time, or None if it couldn't be retrieved
-        """
-        try:
-            # Try to get MT5 server time
-            mt5_server_time = self._mt5_manager.get_server_time()
-
-            if mt5_server_time:
-                # Successfully got MT5 server time
-                return mt5_server_time
-
-            # If we couldn't get MT5 server time, log the issue
-            self._logger.log_error(
-                level="ERROR",
-                message="Failed to get MT5 server time",
-                exception_type="MT5TimeError",
-                function="_get_mt5_server_time",
-                traceback="",
-                context={}
-            )
-            return None
-
-        except Exception as e:
-            self._logger.log_error(
-                level="ERROR",
-                message=f"Error getting MT5 server time: {str(e)}",
-                exception_type=type(e).__name__,
-                function="_get_mt5_server_time",
-                traceback=traceback.format_exc(),
-                context={}
-            )
-            return None
 
     def is_market_open(self, symbol: str) -> bool:
         """
@@ -1593,7 +1643,10 @@ class DataFetcher:
             bool: True if the market is open, False otherwise
         """
         try:
-            # First try the MT5 API
+            # First try the MT5 API through the MT5 manager
+            if not self._mt5_manager or not self._mt5_manager.ensure_connection():
+                return False
+
             symbol_info = self._mt5_manager.get_symbol_info(symbol)
             if symbol_info:
                 # Check the 'trade_mode' property - 0 means no trading
@@ -1603,7 +1656,7 @@ class DataFetcher:
             # Get current time from MT5 if possible, otherwise system time
             current_time = self._get_mt5_server_time()
             if not current_time:
-                current_time = datetime.now(timezone.utc).replace(tzinfo=None)
+                current_time = datetime.now(timezone.utc)
 
             # Check for weekend (Saturday = 5, Sunday = 6)
             weekday = current_time.weekday()
@@ -1635,3 +1688,69 @@ class DataFetcher:
             )
             # Default to assuming market is open when uncertain
             return True
+
+    def _get_mt5_server_time(self) -> Optional[datetime]:
+        """
+        Get the current MT5 server time with proper error handling and timezone handling.
+
+        Returns:
+            datetime: The current MT5 server time (as UTC time with timezone info preserved),
+                     or None if it couldn't be retrieved
+        """
+        try:
+            # Use MT5 manager to get server time
+            if self._mt5_manager and hasattr(self._mt5_manager, 'get_server_time'):
+                server_time = self._mt5_manager.get_server_time()
+                if server_time:
+                    # Ensure it has timezone info
+                    if server_time.tzinfo is None:
+                        server_time = server_time.replace(tzinfo=timezone.utc)
+                    return server_time
+
+            self._logger.log_error(
+                level="ERROR",
+                message="Failed to get MT5 server time via MT5 manager",
+                exception_type="MT5DataError",
+                function="_get_mt5_server_time",
+                traceback="",
+                context={}
+            )
+            return None
+
+        except Exception as e:
+            self._logger.log_error(
+                level="ERROR",
+                message=f"Error getting MT5 server time: {str(e)}",
+                exception_type=type(e).__name__,
+                function="_get_mt5_server_time",
+                traceback=str(e),
+                context={}
+            )
+            return None
+
+    def ensure_connection(self) -> bool:
+        """Ensure MT5 connection is available through MT5 manager"""
+        try:
+            # Use the MT5 manager instance to check connection
+            if self._mt5_manager and hasattr(self._mt5_manager, 'ensure_connection'):
+                return self._mt5_manager.ensure_connection()
+            else:
+                self._logger.log_error(
+                    level="ERROR",
+                    message="MT5 manager not available or missing ensure_connection method",
+                    exception_type="ConnectionError",
+                    function="ensure_connection",
+                    traceback="",
+                    context={}
+                )
+                return False
+        except Exception as e:
+            self._logger.log_error(
+                level="ERROR",
+                message=f"Error in ensure_connection: {str(e)}",
+                exception_type=type(e).__name__,
+                function="ensure_connection",
+                traceback=str(e),
+                context={}
+            )
+            return False

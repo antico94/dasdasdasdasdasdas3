@@ -496,7 +496,7 @@ class MT5Manager:
             return False
 
     def get_server_time(self) -> Optional[datetime]:
-        """Get current MT5 server time"""
+        """Get current MT5 server time with timezone information preserved"""
         if not self.ensure_connection():
             return None
 
@@ -508,7 +508,8 @@ class MT5Manager:
 
                 if last_tick:
                     # Get time from the tick (server time)
-                    server_time = datetime.fromtimestamp(last_tick.time, tz=timezone.utc).replace(tzinfo=None)
+                    # Keep timezone info for proper comparisons
+                    server_time = datetime.fromtimestamp(last_tick.time, tz=timezone.utc)
                     return server_time
 
             # If all configured symbols fail, try to get any available symbol
@@ -530,7 +531,7 @@ class MT5Manager:
                 last_tick = mt5.symbol_info_tick(symbol)
 
                 if last_tick:
-                    server_time = datetime.fromtimestamp(last_tick.time, tz=timezone.utc).replace(tzinfo=None)
+                    server_time = datetime.fromtimestamp(last_tick.time, tz=timezone.utc)
                     return server_time
 
             self._logger.log_error(
