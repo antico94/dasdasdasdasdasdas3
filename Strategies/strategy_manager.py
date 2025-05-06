@@ -278,11 +278,9 @@ class StrategyManager:
             all_strategies.extend(symbol_strategies.values())
         return all_strategies
 
-    # Strategy to handle deadlocks in the StrategyManager class
-
     def _on_new_bar(self, event: NewBarEvent):
         """
-        Handle new bar events.
+        Handle new bar events with improved error handling.
 
         Args:
             event: New bar event
@@ -292,18 +290,67 @@ class StrategyManager:
             symbol = event.symbol
             timeframe_id = event.timeframe_id
 
+            # Log new bar event for debugging
+            self.logger.log_event(
+                level="DEBUG",
+                message=f"Received new bar event: {symbol}/{timeframe_id}",
+                event_type="NEW_BAR",
+                component="strategy_manager",
+                action="_on_new_bar",
+                status="received",
+                details={
+                    "symbol": symbol,
+                    "timeframe_id": timeframe_id,
+                    "timestamp": str(event.timestamp) if hasattr(event, 'timestamp') else "unknown"
+                }
+            )
+
             # Skip if we don't have the timeframe in our mapping
             if timeframe_id not in self.timeframe_by_id:
+                self.logger.log_event(
+                    level="WARNING",
+                    message=f"Unknown timeframe ID: {timeframe_id}",
+                    event_type="NEW_BAR",
+                    component="strategy_manager",
+                    action="_on_new_bar",
+                    status="unknown_timeframe",
+                    details={"timeframe_id": timeframe_id}
+                )
                 return
 
             timeframe = self.timeframe_by_id[timeframe_id]
 
             # Skip if we don't have strategies for this symbol
             if symbol not in self.strategies:
+                self.logger.log_event(
+                    level="INFO",
+                    message=f"No strategies registered for {symbol}",
+                    event_type="NEW_BAR",
+                    component="strategy_manager",
+                    action="_on_new_bar",
+                    status="no_strategies",
+                    details={"symbol": symbol}
+                )
                 return
 
             # Get all strategies for this symbol
             symbol_strategies = self.strategies[symbol]
+
+            # Log the number of strategies found
+            self.logger.log_event(
+                level="DEBUG",
+                message=f"Processing {len(symbol_strategies)} strategies for {symbol}/{timeframe.name}",
+                event_type="NEW_BAR",
+                component="strategy_manager",
+                action="_on_new_bar",
+                status="processing",
+                details={
+                    "symbol": symbol,
+                    "timeframe": timeframe.name,
+                    "strategies_count": len(symbol_strategies),
+                    "strategy_names": list(symbol_strategies.keys())
+                }
+            )
 
             # Get all bars for this symbol and timeframe
             instrument_id = self.instrument_ids.get(symbol)
@@ -389,15 +436,44 @@ class StrategyManager:
             bars.sort(key=lambda x: x.timestamp)
 
             if not bars or len(bars) < 2:  # Need at least 1 completed + 1 forming
+                self.logger.log_event(
+                    level="WARNING",
+                    message=f"Insufficient bars for {symbol}/{timeframe.name}. Need at least 2, got {len(bars)}",
+                    event_type="NEW_BAR",
+                    component="strategy_manager",
+                    action="_on_new_bar",
+                    status="insufficient_bars",
+                    details={"symbol": symbol, "timeframe": timeframe.name, "bar_count": len(bars)}
+                )
                 return
 
             # Process each strategy
+            strategies_processed = 0
+            signals_generated = 0
+
             for strategy_name, strategy in symbol_strategies.items():
                 # Skip strategies that don't use this timeframe
                 if timeframe not in strategy.timeframes:
                     continue
 
                 try:
+                    # Log that we're processing this strategy
+                    self.logger.log_event(
+                        level="DEBUG",
+                        message=f"Processing strategy {strategy_name} for {symbol} on {timeframe.name}",
+                        event_type="STRATEGY_PROCESSING",
+                        component="strategy_manager",
+                        action="_on_new_bar",
+                        status="starting",
+                        details={
+                            "strategy_name": strategy_name,
+                            "symbol": symbol,
+                            "timeframe": timeframe.name
+                        }
+                    )
+
+                    strategies_processed += 1
+
                     # Check if timeframes are ready with the TimeframeManager
                     if not self.timeframe_manager.check_timeframe_ready(strategy_name, timeframe):
                         self.logger.log_event(
@@ -420,6 +496,7 @@ class StrategyManager:
 
                     # If a signal was generated, publish it
                     if signal:
+                        signals_generated += 1
                         self.event_bus.publish(signal)
 
                         self.logger.log_event(
@@ -456,6 +533,22 @@ class StrategyManager:
                             "timeframe": timeframe.name
                         }
                     )
+
+            # Log summary of strategies processed
+            self.logger.log_event(
+                level="INFO",
+                message=f"Processed {strategies_processed} strategies for {symbol}/{timeframe.name}, generated {signals_generated} signals",
+                event_type="STRATEGY_PROCESSING",
+                component="strategy_manager",
+                action="_on_new_bar",
+                status="complete",
+                details={
+                    "symbol": symbol,
+                    "timeframe": timeframe.name,
+                    "strategies_processed": strategies_processed,
+                    "signals_generated": signals_generated
+                }
+            )
 
         except Exception as e:
             # Truncate error message to prevent string truncation in SQL

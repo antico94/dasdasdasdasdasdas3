@@ -1242,10 +1242,36 @@ class DataFetcher:
         try:
             # First check if markets are open for any of our symbols
             any_market_open = False
+            symbols_checked = set()  # Track which symbols we've checked
+
             for (symbol, _) in set((symbol, None) for symbol, _ in self._instrument_timeframe_map.keys()):
-                if self.is_market_open(symbol):
+                is_open = self.is_market_open(symbol)
+                symbols_checked.add(symbol)
+
+                # Log market state for each symbol - important for debugging
+                self._logger.log_event(
+                    level="INFO",
+                    message=f"Market state for {symbol}: {'OPEN' if is_open else 'CLOSED'}",
+                    event_type="MARKET_STATE",
+                    component="data_fetcher",
+                    action="_check_and_sync_timeframes",
+                    status="check",
+                    details={"symbol": symbol, "is_open": is_open}
+                )
+
+                if is_open:
                     any_market_open = True
-                    break
+
+            # Log how many symbols we checked
+            self._logger.log_event(
+                level="INFO",
+                message=f"Checked market state for {len(symbols_checked)} symbols. Any markets open: {any_market_open}",
+                event_type="MARKET_CHECK",
+                component="data_fetcher",
+                action="_check_and_sync_timeframes",
+                status="summary",
+                details={"symbols_checked": list(symbols_checked), "any_open": any_market_open}
+            )
 
             if not any_market_open:
                 # All markets are closed, log this and skip synchronization
@@ -1273,19 +1299,14 @@ class DataFetcher:
                 # Use current time but ensure it has timezone info
                 mt5_server_time = datetime.now(timezone.utc)
 
-            # Process timeframes in order: M1 first, then higher timeframes
-            timeframe_minutes = [1, 5, 15, 30, 60, 240, 1440, 10080, 43200]  # M1 to MN1
-
-            # First, sync all M1 timeframes
+            # Force synchronization for all instruments/timeframes
+            # This ensures we don't miss any data
             for (symbol, timeframe), mapping in self._instrument_timeframe_map.items():
-                if timeframe.minutes != 1:
-                    continue  # Skip non-M1 timeframes in this first pass
-
                 # Check if this specific market is open
                 if not self.is_market_open(symbol):
                     self._logger.log_event(
                         level="INFO",
-                        message=f"Market for {symbol} is closed, skipping M1 sync",
+                        message=f"Market for {symbol} is closed, skipping sync",
                         event_type="MARKET_CLOSED",
                         component="data_fetcher",
                         action="_check_and_sync_timeframes",
@@ -1294,32 +1315,19 @@ class DataFetcher:
                     )
                     continue
 
-                # Try to sync this M1 timeframe
-                has_new_m1_bar = self._sync_timeframe(symbol, timeframe, mt5_server_time)
+                # Force sync this timeframe to ensure we have latest data
+                sync_result = self.force_sync(symbol, timeframe)
 
-                # If we have a new M1 bar, check higher timeframes for this symbol
-                if has_new_m1_bar:
-                    self._check_higher_timeframes(symbol, mt5_server_time)
-
-            # Then sync all remaining timeframes
-            # This ensures we don't miss any higher timeframe bars even if M1 didn't trigger
-            for minutes in timeframe_minutes[1:]:  # Skip M1 as we already processed it
-                for (symbol, timeframe), mapping in self._instrument_timeframe_map.items():
-                    if timeframe.minutes == minutes:
-                        # Check if this specific market is open
-                        if not self.is_market_open(symbol):
-                            self._logger.log_event(
-                                level="INFO",
-                                message=f"Market for {symbol} is closed, skipping {timeframe.name} sync",
-                                event_type="MARKET_CLOSED",
-                                component="data_fetcher",
-                                action="_check_and_sync_timeframes",
-                                status="skipped",
-                                details={"symbol": symbol, "timeframe": timeframe.name}
-                            )
-                            continue
-
-                        self._sync_timeframe(symbol, timeframe, mt5_server_time)
+                if not sync_result:
+                    self._logger.log_event(
+                        level="WARNING",
+                        message=f"Failed to sync {symbol}/{timeframe.name}",
+                        event_type="DATA_SYNC",
+                        component="data_fetcher",
+                        action="_check_and_sync_timeframes",
+                        status="sync_failed",
+                        details={"symbol": symbol, "timeframe": timeframe.name}
+                    )
 
         except Exception as e:
             self._logger.log_error(
@@ -1660,7 +1668,7 @@ class DataFetcher:
     def is_market_open(self, symbol: str) -> bool:
         """
         Determine if the market is currently open for the given symbol.
-        Takes into account weekends and typical trading hours.
+        More robust implementation with detailed logging.
 
         Args:
             symbol: The instrument symbol to check
@@ -1671,13 +1679,95 @@ class DataFetcher:
         try:
             # First try the MT5 API through the MT5 manager
             if not self._mt5_manager or not self._mt5_manager.ensure_connection():
+                self._logger.log_event(
+                    level="WARNING",
+                    message=f"MT5 connection unavailable for market check: {symbol}",
+                    event_type="MARKET_CHECK",
+                    component="data_fetcher",
+                    action="is_market_open",
+                    status="connection_failed",
+                    details={"symbol": symbol}
+                )
                 return False
 
+            # Get symbol info from MT5
             symbol_info = self._mt5_manager.get_symbol_info(symbol)
+
+            # Log detailed symbol info for debugging
             if symbol_info:
-                # Check the 'trade_mode' property - 0 means no trading
-                if hasattr(symbol_info, 'trade_mode') and symbol_info.trade_mode == 0:
+                trade_mode = getattr(symbol_info, 'trade_mode', None)
+                session_deals = getattr(symbol_info, 'session_deals', 0)
+
+                self._logger.log_event(
+                    level="DEBUG",
+                    message=f"Symbol info for {symbol}: trade_mode={trade_mode}, session_deals={session_deals}",
+                    event_type="MARKET_CHECK",
+                    component="data_fetcher",
+                    action="is_market_open",
+                    status="symbol_info",
+                    details={
+                        "symbol": symbol,
+                        "trade_mode": trade_mode,
+                        "session_deals": session_deals
+                    }
+                )
+
+                # Check trade_mode - 0 means trading disabled
+                if trade_mode == 0:
+                    self._logger.log_event(
+                        level="INFO",
+                        message=f"Market closed for {symbol}: Trading disabled (trade_mode=0)",
+                        event_type="MARKET_CHECK",
+                        component="data_fetcher",
+                        action="is_market_open",
+                        status="market_closed",
+                        details={"symbol": symbol, "reason": "trade_mode=0"}
+                    )
                     return False
+
+                # Try to get the latest tick as definitive proof of market activity
+                last_tick = self._mt5_manager.get_symbol_info_tick(symbol)
+                if last_tick:
+                    # Check when the last tick was received
+                    current_time = datetime.now(timezone.utc)
+                    tick_time = datetime.fromtimestamp(last_tick.time, tz=timezone.utc)
+                    time_diff = (current_time - tick_time).total_seconds()
+
+                    # If we received a tick in the last 5 minutes, market is definitely open
+                    if time_diff < 300:  # 5 minutes in seconds
+                        self._logger.log_event(
+                            level="INFO",
+                            message=f"Market open for {symbol}: Recent tick received {time_diff:.1f} seconds ago",
+                            event_type="MARKET_CHECK",
+                            component="data_fetcher",
+                            action="is_market_open",
+                            status="market_open",
+                            details={"symbol": symbol, "time_diff": time_diff}
+                        )
+                        return True
+
+                    # If tick is older than 5 minutes but we can still trade, log a warning but consider market open
+                    self._logger.log_event(
+                        level="WARNING",
+                        message=f"Market possibly open for {symbol}: Last tick is {time_diff:.1f} seconds old",
+                        event_type="MARKET_CHECK",
+                        component="data_fetcher",
+                        action="is_market_open",
+                        status="market_uncertain",
+                        details={"symbol": symbol, "time_diff": time_diff}
+                    )
+            else:
+                # Symbol info not available
+                self._logger.log_event(
+                    level="WARNING",
+                    message=f"Symbol info not available for {symbol}",
+                    event_type="MARKET_CHECK",
+                    component="data_fetcher",
+                    action="is_market_open",
+                    status="symbol_unavailable",
+                    details={"symbol": symbol}
+                )
+                return False
 
             # Get current time from MT5 if possible, otherwise system time
             current_time = self._get_mt5_server_time()
@@ -1687,20 +1777,56 @@ class DataFetcher:
             # Check for weekend (Saturday = 5, Sunday = 6)
             weekday = current_time.weekday()
             if weekday == 5:  # Saturday
+                self._logger.log_event(
+                    level="INFO",
+                    message=f"Market closed for {symbol}: Saturday",
+                    event_type="MARKET_CHECK",
+                    component="data_fetcher",
+                    action="is_market_open",
+                    status="market_closed",
+                    details={"symbol": symbol, "weekday": weekday}
+                )
                 return False
 
             if weekday == 6:  # Sunday
                 # Sunday - market typically opens around 5:00 PM Eastern Time
                 # Convert to 24-hour format in server time
                 if current_time.hour < 17:  # Before 5 PM
+                    self._logger.log_event(
+                        level="INFO",
+                        message=f"Market closed for {symbol}: Sunday before opening time",
+                        event_type="MARKET_CHECK",
+                        component="data_fetcher",
+                        action="is_market_open",
+                        status="market_closed",
+                        details={"symbol": symbol, "weekday": weekday, "hour": current_time.hour}
+                    )
                     return False
 
             # Check for Friday close (Friday = 4)
             if weekday == 4:  # Friday
                 if current_time.hour >= 17:  # After 5 PM Eastern
+                    self._logger.log_event(
+                        level="INFO",
+                        message=f"Market closed for {symbol}: Friday after closing time",
+                        event_type="MARKET_CHECK",
+                        component="data_fetcher",
+                        action="is_market_open",
+                        status="market_closed",
+                        details={"symbol": symbol, "weekday": weekday, "hour": current_time.hour}
+                    )
                     return False
 
-            # For other days, assume market is open (could add more specific logic if needed)
+            # For other days, assume market is open (we've already checked trade_mode and ticks)
+            self._logger.log_event(
+                level="INFO",
+                message=f"Market assumed open for {symbol}",
+                event_type="MARKET_CHECK",
+                component="data_fetcher",
+                action="is_market_open",
+                status="market_open",
+                details={"symbol": symbol, "weekday": weekday, "hour": current_time.hour}
+            )
             return True
 
         except Exception as e:
@@ -1712,8 +1838,8 @@ class DataFetcher:
                 traceback=traceback.format_exc(),
                 context={"symbol": symbol}
             )
-            # Default to assuming market is open when uncertain
-            return True
+            # Default to assuming market is closed when uncertain
+            return False
 
     def _get_mt5_server_time(self) -> Optional[datetime]:
         """

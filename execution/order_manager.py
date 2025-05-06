@@ -129,25 +129,80 @@ class OrderManager:
                 context={"signal_type": event.direction, "symbol": event.symbol}
             )
 
+    # execution/order_manager.py - _process_entry_signal method
+    # execution/order_manager.py - _process_entry_signal method
     def _process_entry_signal(self, signal: SignalEvent) -> None:
         """
-        Process an entry (BUY/SELL) signal.
+        Process an entry (BUY/SELL) signal with enhanced error logging.
 
         Args:
             signal: The entry signal
         """
         with self.lock:
             try:
+                # Log start of signal processing
+                self.logger.log_event(
+                    level="INFO",
+                    message=f"Processing {signal.direction} signal for {signal.symbol}",
+                    event_type="ORDER_PROCESSING",
+                    component="order_manager",
+                    action="_process_entry_signal",
+                    status="starting",
+                    details={
+                        "symbol": signal.symbol,
+                        "direction": signal.direction,
+                        "strategy": signal.strategy_name,
+                        "timeframe": signal.timeframe_name
+                    }
+                )
+
                 # Validate signal
                 if not self._validate_entry_signal(signal):
+                    self.logger.log_event(
+                        level="WARNING",
+                        message=f"Signal validation failed for {signal.symbol} {signal.direction}",
+                        event_type="ORDER_VALIDATION",
+                        component="order_manager",
+                        action="_process_entry_signal",
+                        status="validation_failed",
+                        details={
+                            "symbol": signal.symbol,
+                            "direction": signal.direction,
+                            "reason": "Signal validation failed"
+                        }
+                    )
                     return
 
                 # Check market conditions
                 if not self._check_market_conditions(signal.symbol):
+                    self.logger.log_event(
+                        level="WARNING",
+                        message=f"Market conditions not suitable for {signal.symbol} {signal.direction}",
+                        event_type="ORDER_MARKET_CHECK",
+                        component="order_manager",
+                        action="_process_entry_signal",
+                        status="market_check_failed",
+                        details={
+                            "symbol": signal.symbol,
+                            "direction": signal.direction
+                        }
+                    )
                     return
 
                 # Check risk limits
                 if not self._check_risk_limits(signal.symbol):
+                    self.logger.log_event(
+                        level="WARNING",
+                        message=f"Risk limits would be exceeded for {signal.symbol} {signal.direction}",
+                        event_type="ORDER_RISK_CHECK",
+                        component="order_manager",
+                        action="_process_entry_signal",
+                        status="risk_check_failed",
+                        details={
+                            "symbol": signal.symbol,
+                            "direction": signal.direction
+                        }
+                    )
                     return
 
                 # Calculate dynamic risk percentage
@@ -159,20 +214,55 @@ class OrderManager:
                 if position_size <= 0:
                     self.logger.log_event(
                         level="WARNING",
-                        message=f"Invalid position size calculated: {position_size}",
+                        message=f"Invalid position size calculated: {position_size} for {signal.symbol}",
                         event_type="ORDER_CALCULATION",
                         component="order_manager",
                         action="_process_entry_signal",
                         status="invalid_size",
-                        details={"symbol": signal.symbol, "risk_percent": risk_percent}
+                        details={
+                            "symbol": signal.symbol,
+                            "risk_percent": risk_percent,
+                            "position_size": position_size
+                        }
                     )
                     return
 
                 # Calculate take profit levels
                 take_profit_levels = self._calculate_take_profits(signal, stop_loss)
 
-                # Execute two-part order strategy
-                self._execute_partial_profit_strategy(signal, position_size, stop_loss, take_profit_levels)
+                # Execute order strategy with enhanced error reporting
+                order_result = self._execute_partial_profit_strategy(signal, position_size, stop_loss,
+                                                                     take_profit_levels)
+
+                if not order_result:
+                    self.logger.log_event(
+                        level="ERROR",
+                        message=f"Failed to execute order for {signal.symbol} {signal.direction}",
+                        event_type="ORDER_EXECUTION",
+                        component="order_manager",
+                        action="_process_entry_signal",
+                        status="execution_failed",
+                        details={
+                            "symbol": signal.symbol,
+                            "direction": signal.direction,
+                            "position_size": position_size
+                        }
+                    )
+                else:
+                    self.logger.log_event(
+                        level="INFO",
+                        message=f"Successfully executed order for {signal.symbol} {signal.direction}",
+                        event_type="ORDER_EXECUTION",
+                        component="order_manager",
+                        action="_process_entry_signal",
+                        status="success",
+                        details={
+                            "symbol": signal.symbol,
+                            "direction": signal.direction,
+                            "position_size": position_size,
+                            "order_result": order_result
+                        }
+                    )
 
             except Exception as e:
                 self.logger.log_error(
@@ -181,7 +271,11 @@ class OrderManager:
                     exception_type=type(e).__name__,
                     function="_process_entry_signal",
                     traceback=str(e),
-                    context={"signal_type": signal.direction, "symbol": signal.symbol}
+                    context={
+                        "signal_type": signal.direction,
+                        "symbol": signal.symbol,
+                        "strategy": signal.strategy_name
+                    }
                 )
 
     def _validate_entry_signal(self, signal: SignalEvent) -> bool:
@@ -836,24 +930,31 @@ class OrderManager:
             return []
 
     def _execute_partial_profit_strategy(self, signal: SignalEvent, position_size: float, stop_loss: float,
-                                         take_profit_levels: List[float]) -> None:
+                                         take_profit_levels: List[float]) -> Dict:
         """
         Execute a two-part position strategy for better risk management.
+        Returns order execution result dictionary.
 
         Args:
             signal: The trading signal
             position_size: Total position size
             stop_loss: Stop loss price
             take_profit_levels: List of take-profit levels
+
+        Returns:
+            Dict containing order execution results
         """
         try:
             # Get minimum lot size
             symbol_info = self.mt5_manager.get_symbol_info(signal.symbol)
             if not symbol_info:
-                return
+                return {"success": False, "error": "Symbol info not available", "orders": []}
 
             min_lot = getattr(symbol_info, 'volume_min', 0.01)
             lot_step = getattr(symbol_info, 'volume_step', 0.01)
+
+            # Save order results for return
+            order_results = []
 
             # If position size is too small to split or only one take profit level
             if position_size < 2 * min_lot or len(take_profit_levels) < 2:
@@ -877,8 +978,13 @@ class OrderManager:
                 )
 
                 # Place single order
-                self._place_order(signal, position_size, stop_loss, take_profit)
-                return
+                result = self._place_order(signal, position_size, stop_loss, take_profit)
+                order_results.append(result)
+
+                return {
+                    "success": result.get('result', False) if result else False,
+                    "orders": order_results
+                }
 
             # Split position into two parts
             position_size_1 = position_size * 0.5
@@ -917,7 +1023,8 @@ class OrderManager:
 
                 # Place first order
                 comment = f"{signal.strategy_name}_Part1"
-                self._place_order(signal, position_size_1, stop_loss, take_profit_levels[0], comment)
+                result1 = self._place_order(signal, position_size_1, stop_loss, take_profit_levels[0], comment)
+                order_results.append(result1)
 
             # Execute second part with second target
             if position_size_2 >= min_lot and len(take_profit_levels) > 1:
@@ -939,7 +1046,15 @@ class OrderManager:
 
                 # Place second order
                 comment = f"{signal.strategy_name}_Part2"
-                self._place_order(signal, position_size_2, stop_loss, take_profit_levels[1], comment)
+                result2 = self._place_order(signal, position_size_2, stop_loss, take_profit_levels[1], comment)
+                order_results.append(result2)
+
+            # Return complete results dictionary
+            success = any(result.get('result', False) for result in order_results if result)
+            return {
+                "success": success,
+                "orders": order_results
+            }
 
         except Exception as e:
             self.logger.log_error(
@@ -948,13 +1063,18 @@ class OrderManager:
                 exception_type=type(e).__name__,
                 function="_execute_partial_profit_strategy",
                 traceback=str(e),
-                context={"signal_type": signal.direction, "symbol": signal.symbol}
+                context={
+                    "signal_type": signal.direction,
+                    "symbol": signal.symbol,
+                    "position_size": position_size
+                }
             )
+            return {"success": False, "error": str(e), "orders": []}
 
     def _place_order(self, signal: SignalEvent, position_size: float, stop_loss: float, take_profit: float,
-                     comment: str = "") -> None:
+                     comment: str = "") -> Dict[str, Any]:
         """
-        Place an order with MT5.
+        Place an order with MT5 with improved error handling.
 
         Args:
             signal: The trading signal
@@ -962,11 +1082,37 @@ class OrderManager:
             stop_loss: Stop loss price
             take_profit: Take profit price
             comment: Optional comment for the order
+
+        Returns:
+            Dict containing order result
         """
         try:
             # Validate parameters
             if position_size <= 0:
-                return
+                error_msg = f"Invalid position size: {position_size}"
+                self.logger.log_event(
+                    level="ERROR",
+                    message=error_msg,
+                    event_type="ORDER_VALIDATION",
+                    component="order_manager",
+                    action="_place_order",
+                    status="invalid_size",
+                    details={"position_size": position_size}
+                )
+                return {'result': False, 'error': error_msg}
+
+            # Connect to MT5 before placing order - this is critical
+            if not self.mt5_manager.ensure_connection():
+                error_msg = "MT5 connection failed"
+                self.logger.log_event(
+                    level="ERROR",
+                    message=error_msg,
+                    event_type="MT5_CONNECTION",
+                    component="order_manager",
+                    action="_place_order",
+                    status="connection_failed"
+                )
+                return {'result': False, 'error': error_msg}
 
             # Convert signal direction to MT5 order type
             order_type = 0 if signal.direction == "BUY" else 1  # 0=BUY, 1=SELL
@@ -986,7 +1132,17 @@ class OrderManager:
                     else:
                         entry_price = symbol_info.bid
                 else:
-                    return
+                    error_msg = f"Could not get current price for {signal.symbol}"
+                    self.logger.log_event(
+                        level="ERROR",
+                        message=error_msg,
+                        event_type="MT5_DATA",
+                        component="order_manager",
+                        action="_place_order",
+                        status="price_unavailable",
+                        details={"symbol": signal.symbol}
+                    )
+                    return {'result': False, 'error': error_msg}
 
             # Log order request
             self.logger.log_event(
@@ -1017,6 +1173,19 @@ class OrderManager:
                 tp=take_profit,
                 comment=comment
             )
+
+            # Check if MT5 manager returned anything
+            if result is None:
+                error_msg = "MT5 place_order returned None"
+                self.logger.log_event(
+                    level="ERROR",
+                    message=error_msg,
+                    event_type="MT5_ORDER_ERROR",
+                    component="order_manager",
+                    action="_place_order",
+                    status="null_result"
+                )
+                return {'result': False, 'error': error_msg}
 
             if result and 'order' in result and result['order']:
                 # Get order ticket
@@ -1070,8 +1239,15 @@ class OrderManager:
                     'strategy': signal.strategy_name,
                     'signal_id': getattr(signal, 'id', None)
                 }
+
+                return {
+                    'result': True,
+                    'order': ticket,
+                    'price': entry_price,
+                    'volume': position_size
+                }
             else:
-                # Log failed order
+                # Log failed order with detailed error info
                 error_info = result.get('error', 'Unknown error') if result else 'No result'
 
                 self.logger.log_event(
@@ -1085,9 +1261,12 @@ class OrderManager:
                         "symbol": signal.symbol,
                         "direction": signal.direction,
                         "position_size": position_size,
-                        "error": error_info
+                        "error": error_info,
+                        "raw_result": str(result)
                     }
                 )
+
+                return {'result': False, 'error': error_info}
 
         except Exception as e:
             self.logger.log_error(
@@ -1096,8 +1275,13 @@ class OrderManager:
                 exception_type=type(e).__name__,
                 function="_place_order",
                 traceback=str(e),
-                context={"signal_type": signal.direction, "symbol": signal.symbol}
+                context={
+                    "signal_type": signal.direction,
+                    "symbol": signal.symbol,
+                    "position_size": position_size
+                }
             )
+            return {'result': False, 'error': str(e)}
 
     def _process_close_signal(self, signal: SignalEvent) -> None:
         """

@@ -577,7 +577,7 @@ class MT5Manager:
     def place_order(self, symbol: str, order_type: int, volume: float, price: float,
                     sl: float = 0, tp: float = 0, comment: str = "") -> Dict[str, Any]:
         """
-        Place a trading order.
+        Place a trading order with improved error handling.
 
         Args:
             symbol: The trading symbol
@@ -600,7 +600,52 @@ class MT5Manager:
 
             # Validate inputs
             if volume <= 0:
-                return {'result': False, 'error': 'Invalid volume'}
+                return {'result': False, 'error': f'Invalid volume: {volume}'}
+
+            # Get symbol info first to verify symbol is valid
+            symbol_info = mt5.symbol_info(symbol)
+            if symbol_info is None:
+                error = mt5.last_error()
+                return {
+                    'result': False,
+                    'error': f"Symbol not found or not available: {symbol}. Error: {error[0]}, {error[1]}"
+                }
+
+            # Enable symbol for trading if needed
+            if not symbol_info.visible:
+                if not mt5.symbol_select(symbol, True):
+                    error = mt5.last_error()
+                    return {
+                        'result': False,
+                        'error': f"Failed to select symbol {symbol}. Error: {error[0]}, {error[1]}"
+                    }
+
+            # Check trade allowed
+            if not symbol_info.trade_mode:
+                return {
+                    'result': False,
+                    'error': f"Trading is not allowed for symbol {symbol}"
+                }
+
+            # Validate lot size against symbol limits
+            min_lot = symbol_info.volume_min
+            max_lot = symbol_info.volume_max
+            lot_step = symbol_info.volume_step
+
+            if volume < min_lot:
+                return {
+                    'result': False,
+                    'error': f"Volume {volume} is below minimum lot size {min_lot} for {symbol}"
+                }
+
+            if volume > max_lot:
+                return {
+                    'result': False,
+                    'error': f"Volume {volume} exceeds maximum lot size {max_lot} for {symbol}"
+                }
+
+            # Round volume to correct step size
+            volume = round(volume / lot_step) * lot_step
 
             # Set up order request
             request = {
@@ -618,18 +663,65 @@ class MT5Manager:
                 "type_filling": mt5.ORDER_FILLING_FOK
             }
 
+            # Log the request details
+            self._logger.log_event(
+                level="INFO",
+                message=f"Sending order request to MT5 for {symbol}",
+                event_type="MT5_ORDER_REQUEST",
+                component="mt5_manager",
+                action="place_order",
+                status="sending",
+                details={
+                    "symbol": symbol,
+                    "type": "BUY" if order_type == 0 else "SELL",
+                    "volume": volume,
+                    "sl": sl,
+                    "tp": tp
+                }
+            )
+
             # Send order to MT5
             result = mt5.order_send(request)
 
             if result is None:
                 error = mt5.last_error()
+                self._logger.log_error(
+                    level="ERROR",
+                    message=f"MT5 order_send failed: {error[0]}, {error[1]}",
+                    exception_type="MT5Error",
+                    function="place_order",
+                    traceback="",
+                    context={
+                        "symbol": symbol,
+                        "type": order_type,
+                        "volume": volume,
+                        "error_code": error[0],
+                        "error_message": error[1]
+                    }
+                )
                 return {
                     'result': False,
-                    'error': f"Error code: {error[0]}, Error description: {error[1]}"
+                    'error': f"MT5 error: {error[0]}, {error[1]}"
                 }
 
             # Check result
             if result.retcode == mt5.TRADE_RETCODE_DONE:
+                # Log success details
+                self._logger.log_event(
+                    level="INFO",
+                    message=f"Order executed successfully: Ticket #{result.order}",
+                    event_type="MT5_ORDER_RESULT",
+                    component="mt5_manager",
+                    action="place_order",
+                    status="success",
+                    details={
+                        "ticket": result.order,
+                        "symbol": symbol,
+                        "volume": result.volume,
+                        "price": result.price
+                    }
+                )
+
                 # Success
                 return {
                     'result': True,
@@ -638,10 +730,30 @@ class MT5Manager:
                     'volume': result.volume
                 }
             else:
+                # Log detailed error information
+                error_message = f"Order failed: code={result.retcode}, comment={result.comment}"
+
+                self._logger.log_error(
+                    level="ERROR",
+                    message=error_message,
+                    exception_type="MT5OrderError",
+                    function="place_order",
+                    traceback="",
+                    context={
+                        "symbol": symbol,
+                        "type": order_type,
+                        "volume": volume,
+                        "retcode": result.retcode,
+                        "comment": result.comment
+                    }
+                )
+
                 # Failed
                 return {
                     'result': False,
-                    'error': f"Order failed, retcode={result.retcode}, comment={result.comment}"
+                    'error': error_message,
+                    'retcode': result.retcode,
+                    'comment': result.comment
                 }
 
         except Exception as e:
@@ -911,3 +1023,48 @@ class MT5Manager:
                 context={}
             )
             return {}
+
+    def get_symbol_info_tick(self, symbol: str) -> Any:
+        """
+        Get the latest tick info for a symbol.
+
+        Args:
+            symbol: The symbol to get tick for
+
+        Returns:
+            Tick info or None if not available
+        """
+        if not self.ensure_connection():
+            return None
+
+        try:
+            # Import inside method to avoid circular imports
+            import MetaTrader5 as mt5
+
+            # Get symbol info tick
+            tick = mt5.symbol_info_tick(symbol)
+
+            if tick is None:
+                error = mt5.last_error()
+                self._logger.log_error(
+                    level="ERROR",
+                    message=f"Failed to get tick for {symbol}: {error[0]}, {error[1]}",
+                    exception_type="MT5DataError",
+                    function="get_symbol_info_tick",
+                    traceback="",
+                    context={"symbol": symbol, "error_code": error[0], "error_message": error[1]}
+                )
+                return None
+
+            return tick
+
+        except Exception as e:
+            self._logger.log_error(
+                level="ERROR",
+                message=f"Error getting tick for {symbol}: {str(e)}",
+                exception_type=type(e).__name__,
+                function="get_symbol_info_tick",
+                traceback=str(e),
+                context={"symbol": symbol}
+            )
+            return None
